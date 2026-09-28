@@ -1052,9 +1052,13 @@ describe("native subagent fleet", () => {
 			try {
 				const lines = component.render(100);
 				assert.ok(lines.some((line) => line.includes("FINAL ASYNC OUTPUT")));
-				assert.ok(lines.some((line) => line.includes("output-0.log")));
+				// Artifact paths wrap to stay within width under a long TMPDIR (and
+				// sit in a two-column layout), so match basenames against the
+				// render with chrome and padding removed.
+				const unwrapped = lines.join("").replace(/\x1b\[[0-9;]*m/gu, "").replace(/[│├┤╭╮╰╯┬┴┼─]/gu, "").replace(/\s+/gu, "");
+				assert.ok(unwrapped.includes("output-0.log"), "rendered artifacts should include output-0.log");
 				assert.ok(lines.some((line) => line.includes("worker") && line.includes("[fork]")));
-				assert.ok(lines.some((line) => line.includes("worker.jsonl")));
+				assert.ok(unwrapped.includes("worker.jsonl"), "rendered artifacts should include worker.jsonl");
 				for (const line of lines) assert.ok(visibleWidth(line) <= 100, `line exceeded width: ${line}`);
 				tui.terminal.rows = 10;
 				assert.ok(component.render(100).length <= 8, "short-terminal render should fit the overlay's 85% height cap");
