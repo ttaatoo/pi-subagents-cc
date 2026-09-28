@@ -12,7 +12,7 @@ import { createCapacityResilientJsonWriter } from "../../shared/capacity-resilie
 import { isStorageCapacityError } from "../../shared/file-system-retry.ts";
 import { updateActiveRunIndex } from "./active-run-index.ts";
 import { createChildTranscriptWriter, type ChildTranscriptWriter } from "../../shared/child-transcript.ts";
-import { closeSteerInbox, consumeInterruptRequest, consumeSteerRequests, consumeStopRequestPayloads, deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest, watchAsyncControlInbox, type SteerRequest, type StopRequest } from "./control-channel.ts";
+import { closeSteerInbox, closeStopInbox, consumeInterruptRequest, consumeSteerRequests, consumeStopRequestPayloads, deliverInterruptRequest, deliverStopRequest, deliverTimeoutRequest, watchAsyncControlInbox, type SteerRequest, type StopRequest } from "./control-channel.ts";
 import { appendJsonl as appendRawJsonl, formatOutputArtifactContent, getArtifactPaths, writeArtifact, writeMetadata } from "../../shared/artifacts.ts";
 import { PI_CODING_AGENT_PACKAGE, resolveInstalledPiPackageRoot } from "../shared/pi-spawn.ts";
 import { preflightLaunchCwd } from "../shared/launch-cwd.ts";
@@ -96,6 +96,7 @@ import { nestedSummaryFromAsyncStatus, projectNestedEvents, resolveNestedAsyncDi
 import { formatSubagentModelVerificationError, isContextOverflow } from "../shared/model-resolution.ts";
 import { processTerminalPath, writeProcessTerminalCandidate, type ProcessTerminalCandidate } from "./process-terminal.ts";
 import { persistRunnerStartupFailure } from "./runner-startup-failure.ts";
+import { currentPidNamespaceScope } from "./pid-namespace.ts";
 import { createSteeringStatus, recordSteeringRequest, steeringStatus, terminalSteeringNoticeState, unconsumedSteerReason, updateSteeringTarget } from "./steering.ts";
 import { PROMPT_REDACTED, detectSubagentError, extractTextFromContent, extractToolArgsPreview, formatEmptyTerminalAssistantResponseError, getAgentDir, getFinalOutput, hasEmptyTerminalAssistantResponse, readStatus } from "../../shared/utils.ts";
 import { planAbortRecovery } from "../shared/abort-recovery.ts";
@@ -1094,9 +1095,9 @@ export async function runSingleStepInner(
 			const message = error instanceof Error ? error.message : String(error);
 			return omitUndefinedProperties({ agent: step.agent, output: message, error: message, exitCode: 1, context: step.context, thinkingCeiling: step.thinkingCeiling });
 		}
+		const attemptModel = omitUndefinedProperties({ model: candidate, thinking: resolveEffectiveThinking(candidate, step.thinking) });
 		ctx.onAttemptStart?.(omitUndefinedProperties({
-			model: candidate,
-			thinking: resolveEffectiveThinking(candidate, step.thinking),
+			...attemptModel,
 			contextLimit: findModelInfo(candidate, step.modelVerificationRegistry)?.contextWindow,
 		}));
 		const outputSnapshot = captureSingleOutputSnapshot(step.outputPath);
@@ -1212,6 +1213,7 @@ export async function runSingleStepInner(
 			timeoutMessage: ctx.timeoutMessage,
 			stopMessage: ctx.stopMessage,
 			onChildEvent: ctx.onChildEvent,
+			onContextWindow: (contextLimit) => ctx.onAttemptStart?.({ ...attemptModel, contextLimit }),
 			transcriptWriter,
 			toolTimeoutMs: ctx.toolTimeoutMs,
 			runDeadlineAt: ctx.deadlineAt,
@@ -2034,6 +2036,7 @@ export async function runSubagent(
 		...(config.toolBudget ? { toolBudget: initialToolBudgetState(config.toolBudget) } : {}),
 		...(config.usageBudget ? { usageBudget: usageBudgetState(config.usageBudget, undefined) } : {}),
 		pid: process.pid,
+		pidNamespaceScope: currentPidNamespaceScope(),
 		cwd,
 		currentStep: 0,
 		chainStepCount: steps.length,
@@ -4860,6 +4863,12 @@ export async function runSubagent(
 		timedOut = true;
 	}
 	disposeControlInbox();
+	try {
+		closeStopInbox(asyncDir);
+	} catch (error) {
+		// Result publication must not depend on the marker; without it a late stop is accepted as before.
+		appendJsonl(eventsPath, JSON.stringify({ type: "subagent.run.stop_inbox_close_failed", ts: Date.now(), runId: id, message: error instanceof Error ? error.message : String(error) }));
+	}
 	for (const request of consumeStopRequestPayloads(asyncDir)) stopChildStep(request);
 	const signalTerminated = !stopped && !timedOut && !interrupted && results.some((result) => result.exitCode !== 0 && isUnexplainedProcessSignal(omitUndefinedProperties({
 		processSignal: result.processSignal,

@@ -4,40 +4,147 @@
 
 ### Added
 
-- In-process RPC `cost` method: returns the same parent-plus-child accounting `/subagent-cost` renders, as versioned data (`{ version: 1, parent, children, childTotal, total, unresolvedAsyncChildren }`), so other extensions can surface subagent spend without scraping slash output. `ping.capabilities.cost` advertises `{ version: 1 }`. The report logic moved unchanged into `src/slash/subagent-cost.ts`; `/subagent-cost` output is identical. Thanks to [@raymondtri](https://github.com/raymondtri) for [#2378](https://github.com/nicobailon/pi-subagents/pull/2378).
-- Emit public lifecycle events for async `workflowScript` roots and their dynamically launched keyed children so companion UIs can follow authoritative run artifacts without scraping terminal output. Thanks to [@navidemad](https://github.com/navidemad) for [#2382](https://github.com/nicobailon/pi-subagents/pull/2382).
+- After you upgrade pi-subagents, your first interactive session shows a short notice with the highlights of each new version and a link to the changelog. It is shown once and never enters the conversation, so it does not change the model's context or prompt cache. A fresh install and child sessions show nothing.
+- `subagents.agentOverrides.<name>.advertise` adds an agent to the parent-prompt catalog from settings, so you no longer have to copy a builtin agent file just to advertise it. Runtime-registered agents still cannot be advertised. Thanks to [@strive-run](https://github.com/strive-run) for [#2534](https://github.com/nicobailon/pi-subagents/pull/2534).
 
 ### Changed
 
-- Preserve bounded, sanitized validation evidence when a `structured_output` call is rejected, while reserving the missing-call error for runs that never invoked the tool. Thanks to [@rtbe](https://github.com/rtbe) for [#2407](https://github.com/nicobailon/pi-subagents/issues/2407).
-- Packaged `worker` agents now default to fresh context so implementation briefs do not compete with the parent's unfinished conversation. Explicit and globally configured fork context remain available. Thanks to [@eduardopicolo-cb](https://github.com/eduardopicolo-cb) for [#2384](https://github.com/nicobailon/pi-subagents/issues/2384).
-- Raise the optional `@earendil-works/pi-ai` peer dependency floor to 0.86.1 so package metadata no longer advertises unsupported older hosts. Thanks to [@samuela](https://github.com/samuela) for [#2373](https://github.com/nicobailon/pi-subagents/issues/2373).
-- Keep the full `subagent` tool dormant until an authorized request activates it through the compact discovery loader, reducing unrelated prompt context without changing direct command, RPC, TUI, or nested-child execution. Thanks to [@Knimoms](https://github.com/Knimoms) for [#2380](https://github.com/nicobailon/pi-subagents/pull/2380).
-- Child sessions now keep their readable name (for example `worker: fix auth refresh`) in session lists, `/resume`, and Herdr, even when the intercom bridge is active. The child's intercom route becomes its pi-intercom session ID instead of its session name, and nested children address their supervisor by that route. This needs a pi-intercom version that supports the `intercom:session-identity` claim; with an older pi-intercom, children keep the route as their name so routing still works. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the problem in [#2432](https://github.com/nicobailon/pi-subagents/pull/2432).
+- The `subagents_enable` result told the model to wait for the next prompt on some providers, even when `subagent` was already available in the current turn. It now tells the model to check its tool list: if a `subagent` tool is there, use it; if not, wait for the next user prompt instead of retrying. The `--exclude-tools subagents_enable` hint for operators is unchanged.
+- CI now runs the native tool-activation smoke test on the existing Ubuntu typecheck leg, so dynamic activation and schema-budget regressions are covered by required checks. Thanks to [@quifox](https://github.com/quifox) for [#2528](https://github.com/nicobailon/pi-subagents/pull/2528).
 
 ### Fixed
 
-- Background runners and external CLI agents no longer inherit Git's repository-routing variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, and the rest of `git rev-parse --local-env-vars`). When Pi was started from a Git hook or with `git --git-dir`, those variables made a child's Git commands act on the parent's repository instead of the child's working directory. Other variables, including `GIT_AUTHOR_*`, still pass through, and an external agent's explicit environment allowlist is unchanged. Thanks to [@alexei-led](https://github.com/alexei-led) for [#2437](https://github.com/nicobailon/pi-subagents/issues/2437) and [#2440](https://github.com/nicobailon/pi-subagents/pull/2440).
-- `/prompt-workflow` now finds prompt files that are symlinks (as installed by dotfile managers such as GNU Stow or homeshick), and skips dangling links instead of failing. Thanks to [@nietaki](https://github.com/nietaki) for [#2430](https://github.com/nicobailon/pi-subagents/issues/2430).
-- A `runs.run`/`runs.all` workflow child without an `agent` now fails with an error naming that child (`Workflow child 'r1' has no agent…`) instead of the generic "Provide exactly one mode" message. Thanks to [@matthewmathistrellys](https://github.com/matthewmathistrellys) for raising the confusing error in [#2422](https://github.com/nicobailon/pi-subagents/issues/2422).
-- When a background runner exits before writing a result, the failure notification now includes the runner's exit code and signal alongside its PID, even when the full process tree could not be verified. Thanks to [@grahama1970](https://github.com/grahama1970) for [#2423](https://github.com/nicobailon/pi-subagents/issues/2423).
-- Preserve validated structured output as evidence when a later provider failure or abort keeps the child run failed, without hiding independent watchdog findings or starting an extra continuation turn. Thanks to [@grahama1970](https://github.com/grahama1970) for [#2411](https://github.com/nicobailon/pi-subagents/issues/2411).
-- Discover the authoritative Pi package root for Bun-compiled hosts from Pi's package directory or validated image-owned adjacent and `share/pi-coding-agent` layouts, while keeping unrelated extension dependencies ineligible to enable dynamic tools. Thanks to [@fmoda3](https://github.com/fmoda3) for [#2417](https://github.com/nicobailon/pi-subagents/issues/2417).
-- Keep the bundled reviewer's required `watchdog_diff` available in non-Git directories as a read-only unavailable-baseline report, rather than failing the review before independent file inspection. Thanks to [@matthewmathistrellys](https://github.com/matthewmathistrellys) for [#2422](https://github.com/nicobailon/pi-subagents/issues/2422).
-- Treat the bundled reviewer's `watchdog_diff` tool as read-only when assigning a single output path, so reviewers return their complete artifact for runtime persistence as introduced in [#426](https://github.com/nicobailon/pi-subagents/issues/426), with thanks to Alexander Gerdes ([@Avg8888](https://github.com/Avg8888)). Thanks to [@riskywhat](https://github.com/riskywhat) for [#2405](https://github.com/nicobailon/pi-subagents/issues/2405).
-- Respect `disable-model-invocation: true` in subagent skill injection: hidden skills are no longer leaked into child `<available_skills>` prompts, even when a caller resolves them by name, and no longer surface in model-facing proactive skill recommendations. Thanks to [@toRolex](https://github.com/toRolex) for [#2400](https://github.com/nicobailon/pi-subagents/pull/2400).
-- Resolve npm-hosted peer aliases to their canonical package paths so pnpm symlinks preserve dependency scope and module identity. Thanks to [@henriquebastos](https://github.com/henriquebastos) for [#2409](https://github.com/nicobailon/pi-subagents/pull/2409).
-- Clarify that the retained workflow-child roster is not exhaustive: when an exact direct-run id is known, inspect its status and attempt the authoritative resume before using a labeled same-role fallback for a missing candidate or rejected eligibility. Thanks to [@riskywhat](https://github.com/riskywhat) for [#2406](https://github.com/nicobailon/pi-subagents/issues/2406).
-- Prevent retained background runs from timing out during packaged-runner startup before they can report readiness. Thanks to [@muermaru](https://github.com/muermaru) for [#2403](https://github.com/nicobailon/pi-subagents/issues/2403), and to [@qsgy-edge](https://github.com/qsgy-edge) for the independent diagnosis and timing evidence in [#2415](https://github.com/nicobailon/pi-subagents/pull/2415).
-- Prevent duplicate completion notifications when multiple extension registrations for the same session coexist in one process. Thanks to [@hongchu098](https://github.com/hongchu098) for [#2389](https://github.com/nicobailon/pi-subagents/issues/2389).
-- Make running and failed external CLI logs inspectable in Fleet, tool status, and TUI surfaces with bounded, contained reads ([#2375](https://github.com/nicobailon/pi-subagents/issues/2375), thanks [@Shujakuinkuraudo](https://github.com/Shujakuinkuraudo)).
-- Preserve and safely prune Pi 0.87 context edits when forking sessions, including replacement content and signed Anthropic thinking blocks.
-- Restore watchdog reviews and permission arbitration on the stable Pi 0.86.1 host package layout. Thanks to [@zieglar](https://github.com/zieglar) for the reproduction and version comparison in [#2377](https://github.com/nicobailon/pi-subagents/issues/2377).
-- Allow completed retained agents to resume when their own descendant allowlist excludes them, while preserving both parent authority and the descendant restriction; legacy retained children without original-authority recovery metadata now fail closed. Thanks to [@riskywhat](https://github.com/riskywhat) for [#2379](https://github.com/nicobailon/pi-subagents/issues/2379), building on the allowlist work in [#2338](https://github.com/nicobailon/pi-subagents/pull/2338) credited to [@shkrabov](https://github.com/shkrabov).
-- Report cumulative usage on structured delegation updates without treating unavailable provider cache counters as zero. Thanks to [@bioShaun](https://github.com/bioShaun) for [#2374](https://github.com/nicobailon/pi-subagents/pull/2374).
-- Match MCP direct tool names to the names pi-mcp-adapter registers when a server name prefixes its own tool names, sanitize server prefixes the same way, and honor the adapter's `mcp` prefix mode and per-server `toolPrefix`. Thanks to [@qsgy-edge](https://github.com/qsgy-edge) for [#2395](https://github.com/nicobailon/pi-subagents/pull/2395).
-- Detect dynamic tool support from the running Pi installation, so distributed npm and git installs keep the compact `subagents_enable` loader instead of an always-available `subagent` tool. Thanks to [@qsgy-edge](https://github.com/qsgy-edge) for [#2398](https://github.com/nicobailon/pi-subagents/pull/2398).
+- Machine-generated worktree patches now use explicit `a/` and `b/` prefixes instead of Git's newer `--default-prefix` option, so diff capture works on older Git releases while still overriding `diff.noprefix`. Thanks to [@quifox](https://github.com/quifox) for [#2527](https://github.com/nicobailon/pi-subagents/pull/2527).
+- Dynamic tool activation now works in hosts that run Pi in-process, such as pi-web. pi-subagents no longer tries to read the host Pi version from disk before enabling `subagents_enable`, so those hosts no longer print "Could not locate the running Pi installation" and keep `subagent` always loaded; Pi 0.86.1 is already the oldest supported host. Thanks to [@q107580018](https://github.com/q107580018) for [#2526](https://github.com/nicobailon/pi-subagents/issues/2526).
+- Answering a background subagent's supervisor request no longer wakes the parent again with a stale needs-attention notice and intercom copy. The attention notice now waits 60 seconds and is sent only if the request is still unanswered and the run is still active. Status displays and waits still react to the request immediately.
 
+## [0.73.1] - 2026-09-27
+
+### Highlights
+
+- Turning on `subagent` mid-session no longer throws away the prompt cache, so the next message no longer resends the whole conversation.
+
+### Fixed
+
+- Turning on `subagent` no longer throws away the prompt cache. The catalog of advertised agents is now sent as its own `advertised_subagents` prompt section, which Pi adds at the end of the conversation. Before, pi-subagents rewrote the whole system prompt, so the first message after `subagents_enable` resent the entire conversation to the cache. Fixes [#2518](https://github.com/nicobailon/pi-subagents/issues/2518). Thanks to [@javapacr](https://github.com/javapacr) for [#2519](https://github.com/nicobailon/pi-subagents/pull/2519).
+- Stopping a background run while it was shutting down could report "Stop requested" even though the runner never read the stop, so an interrupted run finished as paused instead of stopped. The stop now fails with a message to retry once the runner has exited, and that retry stops a paused run.
+
+## [0.73.0] - 2026-09-27
+
+### Highlights
+
+- Failed workflows now say what kind of failure happened, such as a bad script, a failed child, or a timeout, so callers can react without parsing error text.
+- Huge workflow results no longer flood the parent's context. Output is capped, every cut is marked, and the full text is saved to a file.
+- A typo in a workflow's agent name now stops the workflow before any child starts, and `validate` suggests the name you probably meant.
+- Running subagent spinners now use the same thinking-level colors as Pi's prompt box.
+- `mcp:` tool selections work with pi-mcp-adapter 3.0's `mcp-adapter.json` files.
+
+### Changed
+
+- Failed workflows now include a `failureKind` in foreground details and async status: `validation`, `script`, `child`, `return-serialization`, `timeout`, `detached-child`, or `runtime`. Callers no longer need to parse the error text to tell these apart. Fixes [#2506](https://github.com/nicobailon/pi-subagents/issues/2506).
+- A running subagent's spinner now uses Pi's prompt-box thinking color. A spinner for one child uses that child's thinking level, or the main session's level when the child has none. A spinner for several children, such as a widget header, a parallel or chain card, or a workflow phase, uses the main session's level. `thinking` labels still show the configured level. Thanks to [@pwguler](https://github.com/pwguler) for [#2512](https://github.com/nicobailon/pi-subagents/pull/2512).
+
+### Fixed
+
+- `mcp:` direct-tool selections now read pi-mcp-adapter 3.0's `mcp-adapter.json` files (the global one and a project's `.pi/mcp-adapter.json`), so a migrated setup no longer fails to launch children with `Unresolved MCP direct-tool selectors`. Pi's own `mcp.json` files are no longer read, because they belong to Pi's built-in MCP support. If your adapter servers are still listed there, move them to `mcp-adapter.json`. Thanks to [@qsgy-edge](https://github.com/qsgy-edge) for [#2511](https://github.com/nicobailon/pi-subagents/pull/2511).
+- Large workflow results no longer flood the parent's context. A foreground workflow caps its Return, Emitted, and Console sections and its failure error at 200 KB or 5000 lines (or your `maxOutput`), shortens each call-trace error to 500 characters, marks each cut, and saves the full text to a file. Async completion notices and `action: "status"` now end cut text in `…` and point to the run's `status.json`. Before, they cut the return value without saying so and showed the full error however long it was. Fixes [#2505](https://github.com/nicobailon/pi-subagents/issues/2505).
+- A workflow script with a misspelled agent name now fails before any child starts, instead of running the earlier children first. `action: "validate"` reports the same error with its line, column, and the closest agent name when there is one (for example `Did you mean 'reviewer'?`). Names built at runtime, and children with their own `cwd`, `agentScope`, or `resume`, are still checked when they launch. Fixes [#2504](https://github.com/nicobailon/pi-subagents/issues/2504).
+- On providers that fix the tool list for a whole prompt, such as bridges to another agent SDK, `subagent` only appears after the next user prompt. The `subagents_enable` result now says so, which stops the model from retrying `subagent` in the same prompt, and it names `--exclude-tools subagents_enable` for keeping `subagent` always available. Fixes [#2513](https://github.com/nicobailon/pi-subagents/issues/2513).
+- A `timeoutMs` or `maxRuntimeMs` above 2,147,483,647 ms (about 24.8 days), the longest delay Node.js timers support, is now rejected before launch, and `action: "resume"` checks its `timeoutMs` the same way. Node shortened such a timer to about 1 ms, so the run timed out almost immediately. Thanks to [@quifox](https://github.com/quifox) for [#2517](https://github.com/nicobailon/pi-subagents/pull/2517).
+
+## [0.72.1] - 2026-09-26
+
+### Fixed
+
+- pi-subagents is published with npm provenance again, so pnpm's `trustPolicy: no-downgrade` accepts it. Releases now go out only through the GitHub `Release` workflow after maintainer approval. The code is the same as 0.72.0, which was published without provenance. Thanks to [@williameckert1](https://github.com/williameckert1) for [#2453](https://github.com/nicobailon/pi-subagents/issues/2453).
+
+## [0.72.0] - 2026-09-26
+
+### Highlights
+
+- Pi starts faster with pi-subagents installed: startup no longer waits on global agent discovery, and the executor and Fleet load the first time you use them.
+- The package no longer bundles its own copy of TypeBox, so installs are smaller and Pi stops warning about the manifest.
+- Models from complete provider extensions now work everywhere pi-subagents calls a model, including the watchdog, permission checks, and Prompt Audit.
+- Other extensions can plug their own inspectors into Fleet.
+- Async runs are more dependable: child sessions can start and resume their own external jobs, `/subagent-cost` counts every async launch, and live runs are no longer marked failed when containers share a temp directory.
+
+### Added
+
+- Extensions can register their own inspector providers with the `pi-subagents/inspectors` helper or the `pi-subagents:inspector-register:v1` event. Fleet uses them for inspector actions, while the built-in inspectors and runner controls keep working as before. Thanks to [@ninjapenguin](https://github.com/ninjapenguin) for [#2482](https://github.com/nicobailon/pi-subagents/pull/2482).
+
+### Changed
+
+- Pi starts faster with pi-subagents enabled. The foreground executor and the Fleet view now load on first use, which cuts the extension's own startup modules from 264 to 199. Tools, commands, and prompts are registered exactly as before. Thanks to [@h4yfans](https://github.com/h4yfans) for the measurements in [#2480](https://github.com/nicobailon/pi-subagents/issues/2480).
+- TypeBox is now provided by Pi instead of bundled with the package. Pi no longer warns about the manifest, and the extension, its children, and background runners all use Pi's copy. Thanks to [@felipemm](https://github.com/felipemm) for [#2454](https://github.com/nicobailon/pi-subagents/issues/2454) and [#2455](https://github.com/nicobailon/pi-subagents/pull/2455).
+
+### Fixed
+
+- The watchdog, permission checks, and Prompt Audit now reach models from complete provider extensions (`pi.registerProvider(provider)`). They used an older lookup that only knew config-style providers, so these calls failed even though ordinary children could use the same model. Thanks to [@chem](https://github.com/chem) for [#2496](https://github.com/nicobailon/pi-subagents/issues/2496).
+- Model names such as `openrouter/auto-beta` now resolve when the provider's own model id already starts with the provider name. They used to fail with `Unknown subagent model`. Thanks to [@schmlblk](https://github.com/schmlblk) for [#2487](https://github.com/nicobailon/pi-subagents/issues/2487).
+- `fast: true` accepts any `openai-codex/*` model instead of only two named models, so newer Codex models no longer fail before launch. Other providers are still rejected. Thanks to [@jtabke](https://github.com/jtabke) for [#2452](https://github.com/nicobailon/pi-subagents/issues/2452).
+- Async status shows a child's real context limit once its session starts, including a limit raised by an extension. Thanks to [@johnhenaot](https://github.com/johnhenaot) for [#2448](https://github.com/nicobailon/pi-subagents/pull/2448).
+- Session startup no longer freezes while pi-subagents looks for globally installed agents. The first agent prompt and `subagents_enable` still wait until discovery finishes. Thanks to [@trading-bl](https://github.com/trading-bl) for [#2474](https://github.com/nicobailon/pi-subagents/issues/2474).
+- `subagents_enable` ignores extra arguments instead of rejecting the call. DeepSeek V4.1 Flash sends `subagents_enable({ action: "enable" })`, which used to fail every time. Thanks to [@crusaderky](https://github.com/crusaderky) for [#2483](https://github.com/nicobailon/pi-subagents/issues/2483).
+- An older `pi-ai` installed next to the package no longer turns off on-demand tool loading, so `subagent` stays hidden behind `subagents_enable` until it is needed. Thanks to [@abdwhb-png](https://github.com/abdwhb-png) for [#2471](https://github.com/nicobailon/pi-subagents/pull/2471).
+- `/council` works when Pi runs with `--no-skills`. It now loads its instructions through `subagent({ action: "guide", topic: "council" })`. Thanks to [@felipemm](https://github.com/felipemm) for [#2467](https://github.com/nicobailon/pi-subagents/issues/2467).
+- External-job runs that a child session launches now start instead of staying queued. Thanks to [@juanpprieto](https://github.com/juanpprieto) for [#2449](https://github.com/nicobailon/pi-subagents/issues/2449).
+- A child session can follow up its own external-job runs with `resume`, and a repeated resume no longer sends the follow-up twice. Thanks to [@juanpprieto](https://github.com/juanpprieto) for [#2465](https://github.com/nicobailon/pi-subagents/issues/2465).
+- A background run that is still working is no longer reported failed when Pi processes in different containers share one `PI_SUBAGENTS_TEMP_ROOT`. Pi could not see the runner's process from another container and treated it as gone. Such runs now fall back to the usual 24-hour stale check. Thanks to [@zeezooz](https://github.com/zeezooz) for [#2494](https://github.com/nicobailon/pi-subagents/issues/2494) and [#2495](https://github.com/nicobailon/pi-subagents/issues/2495).
+- `/subagent-cost` includes async single, chain, and parallel launches, which it used to report as having no child usage. Thanks to [@zeezooz](https://github.com/zeezooz) for [#2484](https://github.com/nicobailon/pi-subagents/issues/2484).
+- Awaited workflow children send the `subagent:async-complete` event without an extra child notification. Thanks to [@mmarabel](https://github.com/mmarabel) for [#2456](https://github.com/nicobailon/pi-subagents/issues/2456).
+- Worktree labels stay within 256 bytes when shortened in the middle of a multi-byte character, so async status stays readable. Thanks to [@chenhaoxiang](https://github.com/chenhaoxiang) for [#2446](https://github.com/nicobailon/pi-subagents/pull/2446).
+- A launch blocked by the session's capability ceiling now fails before any fork work starts. It used to branch the parent session or prepare the fork summary first. Thanks to [@antonioc-cl](https://github.com/antonioc-cl) for [#2481](https://github.com/nicobailon/pi-subagents/pull/2481).
+- The `subagent` schema and guides describe preflight, timeout aliases, budget limits, and child extension bindings accurately, and an empty `usageBudget` is now rejected. Thanks to [@amchen2310](https://github.com/amchen2310) for [#2473](https://github.com/nicobailon/pi-subagents/issues/2473).
+- The async workflow widget no longer flickers while the inline Fleet roster is open. Thanks to [@gustavo-neiva](https://github.com/gustavo-neiva) for [#2468](https://github.com/nicobailon/pi-subagents/pull/2468).
+- `subagent_supervisor` `pending` shows each request's question, so you can answer a request after missing its notice ([#2460](https://github.com/nicobailon/pi-subagents/issues/2460)).
+
+## [0.71.0] - 2026-09-23
+
+### Highlights
+
+- Other extensions can read subagent spend and follow async workflow progress as data, without scraping terminal output.
+- Workflow status can now confirm that every child process has actually exited.
+- Child sessions keep readable names such as `worker: fix auth refresh` in `/resume` and Herdr.
+- The full `subagent` tool loads only when a request needs it, which keeps unrelated prompts smaller.
+- Background runners, reviewers, and Bun, pnpm, and symlinked installs are more reliable.
+
+### Added
+
+- In-process RPC `cost` method. It returns the same parent-plus-child spend that `/subagent-cost` shows, as versioned data (`{ version: 1, parent, children, childTotal, total, unresolvedAsyncChildren }`). `ping.capabilities.cost` advertises `{ version: 1 }`. `/subagent-cost` output is unchanged. Thanks to [@raymondtri](https://github.com/raymondtri) for [#2378](https://github.com/nicobailon/pi-subagents/pull/2378).
+- Async `workflowScript` runs and the children they launch now emit public lifecycle events, so companion UIs can follow them without scraping terminal output. Thanks to [@navidemad](https://github.com/navidemad) for [#2382](https://github.com/nicobailon/pi-subagents/pull/2382).
+- Status for an async workflow now includes `details.workflowTerminalProof`. It reports `observed`, with each child's exit evidence, only after the workflow has stopped launching children and every async child has exited or failed to start. Otherwise it reports `pending` or `unknown` with a reason, including when the saved child list is missing. A finished workflow frees its capacity slot using the same check, so the two always agree. Thanks to [@alexei-led](https://github.com/alexei-led) for [#2436](https://github.com/nicobailon/pi-subagents/issues/2436) and [#2442](https://github.com/nicobailon/pi-subagents/pull/2442).
+
+### Changed
+
+- Packaged `worker` agents now start with fresh context instead of forking the parent's conversation. You can still request fork context per call or set it globally. Thanks to [@eduardopicolo-cb](https://github.com/eduardopicolo-cb) for [#2384](https://github.com/nicobailon/pi-subagents/issues/2384).
+- The full `subagent` tool stays hidden until a request activates it through the small `subagents_enable` loader, which keeps unrelated prompt context smaller. Direct commands, RPC, the TUI, and nested children work as before. Thanks to [@Knimoms](https://github.com/Knimoms) for [#2380](https://github.com/nicobailon/pi-subagents/pull/2380).
+- Child sessions keep a readable name (for example `worker: fix auth refresh`) in session lists, `/resume`, and Herdr while the intercom bridge is active. Nested children now reach their supervisor through the child's intercom ID instead of its session name. This needs a pi-intercom version that supports the `intercom:session-identity` claim; with an older pi-intercom, children keep the previous naming so routing still works. Thanks to [@Q-xuan](https://github.com/Q-xuan) for raising the problem in [#2432](https://github.com/nicobailon/pi-subagents/pull/2432).
+- The optional `@earendil-works/pi-ai` peer dependency now requires 0.86.1 or later, matching the oldest supported Pi host. Thanks to [@samuela](https://github.com/samuela) for [#2373](https://github.com/nicobailon/pi-subagents/issues/2373).
+- When a child's `structured_output` call is rejected, the result now includes a short summary of the validation errors. The missing-structured-output error is used only when the child never called the tool. Thanks to [@rtbe](https://github.com/rtbe) for [#2407](https://github.com/nicobailon/pi-subagents/issues/2407).
+
+### Fixed
+
+- `subagent` is available again after switching from an inactive session branch to one where it was activated.
+- Background runners and external CLI agents no longer inherit Git's repository variables (`GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_CONFIG_*`, and the rest of `git rev-parse --local-env-vars`). When Pi was started from a Git hook or with `git --git-dir`, these made a child's Git commands act on the parent's repository instead of the child's working directory. Other variables such as `GIT_AUTHOR_*` still pass through, and an external agent's explicit environment allowlist is unchanged. Thanks to [@alexei-led](https://github.com/alexei-led) for [#2437](https://github.com/nicobailon/pi-subagents/issues/2437) and [#2440](https://github.com/nicobailon/pi-subagents/pull/2440).
+- Retained background runs no longer time out while the packaged runner is still starting. Thanks to [@muermaru](https://github.com/muermaru) for [#2403](https://github.com/nicobailon/pi-subagents/issues/2403), and to [@qsgy-edge](https://github.com/qsgy-edge) for the independent diagnosis and timing evidence in [#2415](https://github.com/nicobailon/pi-subagents/pull/2415).
+- When a background runner exits without writing a result, the failure notice now includes its exit code and signal. Thanks to [@grahama1970](https://github.com/grahama1970) for [#2423](https://github.com/nicobailon/pi-subagents/issues/2423).
+- A child that produced valid structured output keeps it as evidence when a later provider error or abort fails the run. Thanks to [@grahama1970](https://github.com/grahama1970) for [#2411](https://github.com/nicobailon/pi-subagents/issues/2411).
+- Completion notifications are no longer sent twice when the extension is registered more than once for the same session. Thanks to [@hongchu098](https://github.com/hongchu098) for [#2389](https://github.com/nicobailon/pi-subagents/issues/2389).
+- The bundled reviewer works in directories without Git: `watchdog_diff` reports that no baseline is available instead of failing the review. Thanks to [@matthewmathistrellys](https://github.com/matthewmathistrellys) for [#2422](https://github.com/nicobailon/pi-subagents/issues/2422).
+- The bundled reviewer's `watchdog_diff` counts as read-only, so a reviewer given a single output path returns its full report for the runtime to save, as introduced in [#426](https://github.com/nicobailon/pi-subagents/issues/426), with thanks to Alexander Gerdes ([@Avg8888](https://github.com/Avg8888)). Thanks to [@riskywhat](https://github.com/riskywhat) for [#2405](https://github.com/nicobailon/pi-subagents/issues/2405).
+- Watchdog reviews and permission checks work again on the Pi 0.86.1 package layout. Thanks to [@zieglar](https://github.com/zieglar) for the reproduction and version comparison in [#2377](https://github.com/nicobailon/pi-subagents/issues/2377).
+- A workflow child with no `agent` now fails with an error that names it (`Workflow child 'r1' has no agent…`) instead of the generic "Provide exactly one mode" message. Thanks to [@matthewmathistrellys](https://github.com/matthewmathistrellys) for raising the confusing error in [#2422](https://github.com/nicobailon/pi-subagents/issues/2422).
+- `/prompt-workflow` finds prompt files that are symlinks (as installed by dotfile managers such as GNU Stow or homeshick) and skips broken links instead of failing. Thanks to [@nietaki](https://github.com/nietaki) for [#2430](https://github.com/nicobailon/pi-subagents/issues/2430).
+- Completed retained agents can resume even when their own list of allowed child agents excludes them. Parent authority and that restriction both still apply; older retained children without the needed recovery data fail closed. Thanks to [@riskywhat](https://github.com/riskywhat) for [#2379](https://github.com/nicobailon/pi-subagents/issues/2379), building on the allowlist work in [#2338](https://github.com/nicobailon/pi-subagents/pull/2338) credited to [@shkrabov](https://github.com/shkrabov).
+- Guidance now says the list of retained workflow children is not complete: when you know a run's exact id, check its status and try resuming it before falling back to a labeled agent with the same role. Thanks to [@riskywhat](https://github.com/riskywhat) for [#2406](https://github.com/nicobailon/pi-subagents/issues/2406).
+- Skills marked `disable-model-invocation: true` are no longer shown to child agents, even when requested by name, and are no longer suggested to the model. Thanks to [@toRolex](https://github.com/toRolex) for [#2400](https://github.com/nicobailon/pi-subagents/pull/2400).
+- Pi hosts compiled with Bun are found from Pi's package directory or its bundled `share/pi-coding-agent` layout, while unrelated extension dependencies still cannot turn on dynamic tools. Thanks to [@fmoda3](https://github.com/fmoda3) for [#2417](https://github.com/nicobailon/pi-subagents/issues/2417).
+- pnpm installs follow npm-hosted peer aliases through their symlinks to the real package, so the package is not loaded twice. Thanks to [@henriquebastos](https://github.com/henriquebastos) for [#2409](https://github.com/nicobailon/pi-subagents/pull/2409).
+- npm and git installs detect dynamic tool support from the running Pi installation and keep the compact `subagents_enable` loader instead of an always-loaded `subagent` tool. Thanks to [@qsgy-edge](https://github.com/qsgy-edge) for [#2398](https://github.com/nicobailon/pi-subagents/pull/2398).
+- MCP direct tool names now match what pi-mcp-adapter registers, including servers whose tool names already start with the server name, the adapter's `mcp` prefix mode, and per-server `toolPrefix`. Thanks to [@qsgy-edge](https://github.com/qsgy-edge) for [#2395](https://github.com/nicobailon/pi-subagents/pull/2395).
+- Logs from running and failed external CLI agents can be viewed in Fleet, tool status, and the TUI. Thanks to [@Shujakuinkuraudo](https://github.com/Shujakuinkuraudo) for [#2375](https://github.com/nicobailon/pi-subagents/issues/2375).
+- Structured delegation updates report cumulative usage and no longer count missing provider cache numbers as zero. Thanks to [@bioShaun](https://github.com/bioShaun) for [#2374](https://github.com/nicobailon/pi-subagents/pull/2374).
+- Forked sessions keep Pi 0.87 context edits, including replaced content and signed Anthropic thinking blocks.
 ## [0.70.1] - 2026-09-20
 
 ### Highlights

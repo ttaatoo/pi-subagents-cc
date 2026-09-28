@@ -131,6 +131,8 @@ export interface WorkflowPreflight {
 
 export type WorkflowReceiptState = "complete" | "failed" | "paused" | "stopped";
 
+export type WorkflowScriptFailureKind = "validation" | "script" | "child" | "return-serialization" | "timeout" | "detached-child" | "runtime";
+
 export type WorkflowTerminalResolution = "settled-awaiting-resume" | "failed-child" | "interrupted-child";
 
 export interface WorkflowTerminalOutcome {
@@ -709,6 +711,25 @@ export type ProcessTerminal =
 		/** The runner's own exit, when observed even though the process tree could not be verified. */
 		instances?: RunnerProcessInstanceExit[];
 	});
+
+export type WorkflowTerminalProof =
+	| {
+		version: 1;
+		kind: "workflow";
+		runId: string;
+		state: "observed";
+		dispatchClosed: true;
+		observedAt: number;
+		children: ProcessTerminal[];
+	}
+	| {
+		version: 1;
+		kind: "workflow";
+		runId: string;
+		state: "pending" | "unknown";
+		dispatchClosed: boolean;
+		reason: string;
+	};
 
 /** Identifies the durable schedule that launched a run, so its completion is attributable. */
 export interface ScheduleOrigin {
@@ -1415,6 +1436,7 @@ export interface Details {
 	context?: "fresh" | "fork" | "mixed";
 	results: SingleResult[];
 	workflowChildren?: WorkflowChildSummary;
+	workflowTerminalProof?: WorkflowTerminalProof;
 	/**
 	 * Terminal completion payloads for runs this bg_wait call observed
 	 * finishing. Async completions travel as result files that are consumed and
@@ -1494,6 +1516,7 @@ export interface Details {
 	mission?: MissionRecord;
 	workflow?: {
 		value?: unknown;
+		failureKind?: WorkflowScriptFailureKind;
 		args?: Record<string, unknown>;
 		argsDigest?: string;
 		resource?: WorkflowResourceProvenance;
@@ -1884,6 +1907,8 @@ export interface AsyncStatus {
 	toolBudgetBlocked?: boolean;
 	usageBudget?: UsageBudgetState;
 	pid?: number;
+	/** Linux PID namespace identity used to scope liveness probes. */
+	pidNamespaceScope?: string;
 	cwd?: string;
 	/** Parent-resolved child session root retained for trusted restored transcript lookup. */
 	sessionRoot?: string;
