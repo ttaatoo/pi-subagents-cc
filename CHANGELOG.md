@@ -1,5 +1,22 @@
 # Changelog
 
+## [pi-subagents-cc]
+
+Fork entries. Upstream history below is kept as-is for provenance. Upstream sync point: `8dc90dca` (#2534).
+
+### Added
+
+- `@handle` message dispatch (Claude Code parity, presentation layer only): a leading `@handle` plus a message never reaches the main model. Live children are steered, finished runs resume with the message, and advertised types spawn as background children, each confirmed by one notification line. Bare handles, `@main`, unknown handles, inputs with images, and `@path`-style picks stay with the main model. Contract: `docs/claude-parity.md`.
+- Fleet inspector smart-`Enter`/`→`: opens the inline steer composer for a live child (`Enter` sends, `Tab` cycles steer/follow_up/auto, `Esc`/`←` backs out), otherwise opens the external inspector. `inspect` default key is now `H` only.
+- `m` cycles transcript rendering `md` → `md+` → `raw`; single results cap at 16 KB with an elision notice.
+
+### Changed
+
+- Identity: package `pi-subagents` → `pi-subagents-cc`, installer bin `pi-subagents-cc`, install dir `~/.pi/agent/extensions/subagent-cc`, installed via `pi install https://github.com/ttaatoo/pi-subagents-cc` (never collides with upstream).
+- Running rows use the accent tone everywhere; thinking-level spinner colors are removed.
+- FleetView lists live work only; inline workflow coverage, workflow/project-pane rows, and nested-children expansion now live in the inspector.
+- Safety guidance: "thorough"/"in-depth" wording is not delegation authorization, the blocking critical path stays local, and the tracked task is marked in_progress at async launch. Worded to stay inside the activated schema budget (23866/24000).
+
 ## [Unreleased]
 
 ### Added
