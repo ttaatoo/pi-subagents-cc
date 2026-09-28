@@ -1,18 +1,24 @@
 <p>
-  <img src="https://raw.githubusercontent.com/nicobailon/pi-subagents/main/banner.png" alt="pi-subagents" width="1100">
+  <img src="https://raw.githubusercontent.com/ttaatoo/pi-subagents-cc/main/banner.png" alt="pi-subagents-cc" width="1100">
 </p>
 
-# pi-subagents
+# pi-subagents-cc
 
-`pi-subagents` lets Pi delegate work to focused child agents. Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
+> Independent fork (omp-style, not a GitHub fork) of [`nicobailon/pi-subagents`](https://github.com/nicobailon/pi-subagents)
+> with Claude Code style from [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents).
+> See [FORK.md](FORK.md) for base commit, credits, and what differs.
+
+`pi-subagents-cc` brings **Claude Code-style autonomous sub-agents** to Pi (`Agent`, `get_subagent_result`, `steer_subagent` calling conventions). Use it for code review, scouting, implementation, parallel audits, saved workflows, background jobs, and anything else that benefits from a second or third set of model eyes.
 
 <https://github.com/user-attachments/assets/702554ec-faaf-4635-80aa-fb5d6e292fd1>
 
 ## Install
 
 ```bash
-pi install npm:pi-subagents
+pi install https://github.com/ttaatoo/pi-subagents-cc
 ```
+
+That is the only required step. (Upstream installs via `pi install npm:pi-subagents`; this fork installs from git so it never collides with upstream. The local installer uses `~/.pi/agent/extensions/subagent-cc`.)
 
 That is the only required step. Background children use the host's SDK: npm Pi keeps its detached Node runner; the official Pi 0.86.1 Linux x64 standalone release loads the same runner through Pi's embedded SDK, without a separate SDK install. See [Standalone background execution](docs/standalone-background.md) for the supported boundary and validation gate.
 
@@ -31,6 +37,12 @@ Ask oracle for a second opinion on my current plan. Challenge assumptions and te
 ```text
 Use scout to understand this code based on our discussion, then ask me clarification questions.
 ```
+
+```text
+@reviewer take another look at the auth change.
+```
+
+Type `@` to complete a live agent handle or a startable type; `→`/`Enter` opens a live child for steering, `←`/`Esc` returns to the prompt. See `docs/claude-parity.md` for the full key contract.
 
 ```text
 Run parallel reviewers: one for correctness, one for tests, and one for unnecessary complexity.
@@ -110,7 +122,7 @@ For bounded orchestration, `maxSubagentSpawnsPerRun` limits cumulative logical c
 
 or ask: "Check whether subagents and intercom are set up correctly."
 
-For installed-version help, use `/subagents-guide [topic]` or `subagent({ action: "guide", topic: "workflows" })`. The default topic is `overview`; available topics are `overview`, `workflows`, `agents`, `missions`, `observability`, `tool-reference`, `configuration`, `models`, `watchdog`, `extension-api`, and `council`.
+For installed-version help, use `/subagents-guide [topic]` or `subagent({ action: "guide", topic: "workflows" })`. The default topic is `overview`; available topics are `overview`, `workflows`, `agents`, `missions`, `observability`, `tool-reference`, `configuration`, `models`, `watchdog`, and `extension-api`.
 
 ## Documentation
 

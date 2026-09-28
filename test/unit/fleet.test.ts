@@ -4,14 +4,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describe, it } from "node:test";
 import { visibleWidth, type MarkdownTheme } from "@earendil-works/pi-tui";
-import { createEventBus } from "@earendil-works/pi-coding-agent";
-import { registerInspector } from "../../src/api/inspectors.ts";
-import { getInspectorPlugins, registerInspectorEventListener } from "../../src/inspectors/plugins.ts";
 import { EXTERNAL_RUN_REGISTRY_KEY, EXTERNAL_RUN_REGISTRY_VERSION, registerExternalRun } from "../../src/api/external-runs.ts";
 import { collectFleetSnapshot, openSubagentFleet, SubagentFleetComponent } from "../../src/tui/fleet.ts";
 import { persistForegroundRunHistory, restoreForegroundRunHistory } from "../../src/runs/foreground/foreground-history.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "../../src/tui/fleet-status.ts";
-import { setMainThinkingLevelSource } from "../../src/tui/running-tone.ts";
 import { registerLivePromptAudit, rewritePromptWithGuidance } from "../../src/runs/foreground/prompt-audit.ts";
 import { getArtifactPaths, getArtifactsDir, getProjectArtifactsDir } from "../../src/shared/artifacts.ts";
 import type { HerdrClient } from "../../src/inspectors/herdr/client.ts";
@@ -90,7 +86,6 @@ function writeAsyncRun(root: string, input: {
 const theme = {
 	fg: (_name: string, text: string) => text,
 	bold: (text: string) => text,
-	getThinkingBorderColor: (_level: string) => (text: string) => text,
 };
 
 const markdownTheme: MarkdownTheme = {
@@ -126,7 +121,7 @@ describe("native subagent fleet", () => {
 			sessionManager: { getSessionId: () => "fleet-rewrite-session" },
 			modelRegistry: {
 				async getApiKeyAndHeaders() { return { ok: true as const, apiKey: "test" }; },
-				streamSimple: streamFn,
+				getRegisteredProviderConfig() { return { api: "faux", streamSimple: streamFn }; },
 			},
 		} as never;
 		const rewritten = await rewritePromptWithGuidance({
@@ -543,47 +538,6 @@ describe("native subagent fleet", () => {
 				component.dispose();
 			}
 		} finally {
-			fs.rmSync(root, { recursive: true, force: true });
-		}
-	});
-
-	it("colors running Fleet rows by their child's recorded level, and whole runs by the main session's", () => {
-		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-levels-"));
-		setMainThinkingLevelSource(() => "xhigh");
-		try {
-			writeAsyncRun(root, { id: "level-steps", state: "running", agents: ["scout", "reviewer"], thinking: ["high", "medium"], lastUpdate: 300 });
-			writeAsyncRun(root, { id: "level-workflow", state: "running", mode: "workflow", agents: ["worker"], lastUpdate: 200 });
-			const state = stateForTest();
-			state.foregroundControls.set("level-foreground", { runId: "level-foreground", mode: "single", startedAt: 10, updatedAt: 400, currentAgent: "planner", currentIndex: 0, thinking: "max" });
-			const tones = ["accent", ...["off", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => `thinking:${level}`)];
-			const colored = (tone: string, text: string) => `\x1b[38;5;${Math.max(0, tones.indexOf(tone)) + 100}m${text}\x1b[39m`;
-			const ansiTheme = {
-				fg: (name: string, text: string) => colored(name, text),
-				bold: (text: string) => text,
-				getThinkingBorderColor: (level: string) => (text: string) => colored(`thinking:${level}`, text),
-			};
-			const component = new SubagentFleetComponent(
-				{ terminal: { rows: 40, columns: 140 }, requestRender() {} } as never,
-				ansiTheme as never,
-				state,
-				() => {},
-				{ asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, markdownTheme },
-			);
-			try {
-				const lines = component.render(140);
-				const plain = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
-				const glyphTone = (label: string) => {
-					const code = lines.find((line) => plain(line).includes(`\u25cf ${label}`))?.match(/\x1b\[38;5;(\d+)m\u25cf/)?.[1];
-					return code === undefined ? undefined : tones[Number(code) - 100];
-				};
-				assert.equal(glyphTone("scout"), "thinking:high", "async step uses its recorded level");
-				assert.equal(glyphTone("planner"), "thinking:max", "foreground child uses its recorded level");
-				assert.equal(glyphTone("workflow"), "thinking:xhigh", "a whole workflow run uses the main level");
-			} finally {
-				component.dispose();
-			}
-		} finally {
-			setMainThinkingLevelSource(() => undefined);
 			fs.rmSync(root, { recursive: true, force: true });
 		}
 	});
@@ -1499,9 +1453,7 @@ describe("native subagent fleet", () => {
 		}
 	});
 
-	it("focuses an external inspector registered after Fleet opens", async (t) => {
-		const owner = { events: createEventBus() };
-		t.after(registerInspectorEventListener(owner));
+	it("focuses the inspector pane the operator opens with the inspect key", async () => {
 		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-inspect-focus-"));
 		try {
 			const asyncDir = writeAsyncRun(root, { id: "run-focus", agents: ["worker"] });
@@ -1532,7 +1484,6 @@ describe("native subagent fleet", () => {
 						const component = factory({ terminal: { rows: 32, columns: 100 }, requestRender() {} }, theme, undefined, () => {});
 						try {
 							component.render(100);
-							registerInspector(owner, { ...createHerdrInspectorPlugin({ client }), name: "test-host", available: () => true });
 							component.handleInput("H");
 							for (let attempt = 0; attempt < 500 && !calls.some((args) => args[0] === "pane" && args[1] === "split"); attempt++) {
 								await new Promise((resolve) => setImmediate(resolve));
@@ -1544,7 +1495,7 @@ describe("native subagent fleet", () => {
 				},
 			};
 
-			await openSubagentFleet(ctx as never, state, { asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, inspectorPlugins: () => getInspectorPlugins(owner), inspectorEnv: {} });
+			await openSubagentFleet(ctx as never, state, { asyncDirRoot: root, resultsDir: path.join(root, "results"), refreshMs: 60_000, inspectorPlugins: [createHerdrInspectorPlugin({ client })], inspectorEnv: { HERDR_ENV: "1", HERDR_PANE_ID: "test-pane" } });
 			const split = calls.find((args) => args[0] === "pane" && args[1] === "split");
 			assert.ok(split, `no pane split call: ${JSON.stringify(calls)}`);
 			assert.deepEqual(split.slice(-1), ["--focus"]);
@@ -1703,9 +1654,17 @@ describe("native subagent fleet", () => {
 				},
 			);
 			try {
+				// Claude parity: Enter on a live child opens the inline steer composer;
+			// H opens the external inspector.
 				component.handleInput("\r");
+				assert.ok(component.render(100).some((line) => line.includes("Steer message (steer):")));
+				assert.deepEqual(calls, []);
+				component.handleInput("\x1b");
+				component.handleInput("H");
 				await new Promise((resolve) => setImmediate(resolve));
-				assert.deepEqual(calls, [{ runId: "async-herdr", asyncDir, index: 0 }]);
+				assert.deepEqual(calls, [
+					{ runId: "async-herdr", asyncDir, index: 0 },
+				]);
 				component.handleInput("H");
 				await new Promise((resolve) => setImmediate(resolve));
 				assert.deepEqual(calls, [
@@ -1715,6 +1674,69 @@ describe("native subagent fleet", () => {
 				assert.ok(component.render(100).some((line) => line.includes("Inspector opened.")));
 			} finally {
 				component.dispose();
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("exits the inspector and cancels modal input with the left arrow", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-left-exit-"));
+		try {
+			writeAsyncRun(root, { id: "async-left" });
+			let closed = false;
+			let steerCalls = 0;
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
+				theme as never,
+				stateForTest(),
+				() => { closed = true; },
+				{
+					asyncDirRoot: root,
+					resultsDir: path.join(root, "results"),
+					refreshMs: 60_000,
+					actions: {
+						async steer() { steerCalls++; return { text: "unused" }; },
+						stop() { return { text: "unused" }; },
+						async inspect() { return { text: "unused" }; },
+					},
+				},
+			);
+			try {
+				// Idle overlay: left exits like Esc.
+				component.handleInput("\x1b[D");
+				assert.equal(closed, true);
+				assert.equal(steerCalls, 0);
+			} finally {
+				component.dispose();
+			}
+			let closedAfterComposer = false;
+			const composer = new SubagentFleetComponent(
+				{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
+				theme as never,
+				stateForTest(),
+				() => { closedAfterComposer = true; },
+				{
+					asyncDirRoot: root,
+					resultsDir: path.join(root, "results"),
+					refreshMs: 60_000,
+					actions: {
+						async steer() { steerCalls++; return { text: "unused" }; },
+						stop() { return { text: "unused" }; },
+						async inspect() { return { text: "unused" }; },
+					},
+				},
+			);
+			try {
+				// Open composer, then left cancels it without sending or closing.
+				composer.handleInput("s");
+				assert.ok(composer.render(100).some((line) => line.includes("Steer message (steer):")));
+				composer.handleInput("\x1b[D");
+				assert.equal(closedAfterComposer, false);
+				assert.equal(steerCalls, 0);
+				assert.ok(!composer.render(100).some((line) => line.includes("Steer message (steer):")));
+			} finally {
+				composer.dispose();
 			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });
