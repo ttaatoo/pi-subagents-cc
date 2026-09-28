@@ -1654,9 +1654,17 @@ describe("native subagent fleet", () => {
 				},
 			);
 			try {
+				// Claude parity: Enter on a live child opens the inline steer composer;
+			// H opens the external inspector.
 				component.handleInput("\r");
+				assert.ok(component.render(100).some((line) => line.includes("Steer message (steer):")));
+				assert.deepEqual(calls, []);
+				component.handleInput("\x1b");
+				component.handleInput("H");
 				await new Promise((resolve) => setImmediate(resolve));
-				assert.deepEqual(calls, [{ runId: "async-herdr", asyncDir, index: 0 }]);
+				assert.deepEqual(calls, [
+					{ runId: "async-herdr", asyncDir, index: 0 },
+				]);
 				component.handleInput("H");
 				await new Promise((resolve) => setImmediate(resolve));
 				assert.deepEqual(calls, [
@@ -1666,6 +1674,69 @@ describe("native subagent fleet", () => {
 				assert.ok(component.render(100).some((line) => line.includes("Inspector opened.")));
 			} finally {
 				component.dispose();
+			}
+		} finally {
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("exits the inspector and cancels modal input with the left arrow", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-fleet-left-exit-"));
+		try {
+			writeAsyncRun(root, { id: "async-left" });
+			let closed = false;
+			let steerCalls = 0;
+			const component = new SubagentFleetComponent(
+				{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
+				theme as never,
+				stateForTest(),
+				() => { closed = true; },
+				{
+					asyncDirRoot: root,
+					resultsDir: path.join(root, "results"),
+					refreshMs: 60_000,
+					actions: {
+						async steer() { steerCalls++; return { text: "unused" }; },
+						stop() { return { text: "unused" }; },
+						async inspect() { return { text: "unused" }; },
+					},
+				},
+			);
+			try {
+				// Idle overlay: left exits like Esc.
+				component.handleInput("\x1b[D");
+				assert.equal(closed, true);
+				assert.equal(steerCalls, 0);
+			} finally {
+				component.dispose();
+			}
+			let closedAfterComposer = false;
+			const composer = new SubagentFleetComponent(
+				{ terminal: { rows: 28, columns: 100 }, requestRender() {} } as never,
+				theme as never,
+				stateForTest(),
+				() => { closedAfterComposer = true; },
+				{
+					asyncDirRoot: root,
+					resultsDir: path.join(root, "results"),
+					refreshMs: 60_000,
+					actions: {
+						async steer() { steerCalls++; return { text: "unused" }; },
+						stop() { return { text: "unused" }; },
+						async inspect() { return { text: "unused" }; },
+					},
+				},
+			);
+			try {
+				// Open composer, then left cancels it without sending or closing.
+				composer.handleInput("s");
+				assert.ok(composer.render(100).some((line) => line.includes("Steer message (steer):")));
+				composer.handleInput("\x1b[D");
+				assert.equal(closedAfterComposer, false);
+				assert.equal(steerCalls, 0);
+				assert.ok(!composer.render(100).some((line) => line.includes("Steer message (steer):")));
+			} finally {
+				composer.dispose();
 			}
 		} finally {
 			fs.rmSync(root, { recursive: true, force: true });

@@ -88,14 +88,14 @@ In the TUI, a persistent FleetView below the editor keeps active work visible as
 After you expand it:
 
 ```text
-↑↓/jk select · enter inspect · esc back
+↑↓/jk select · →/enter inspect · ←/esc back
 
 > main
     scout · running         1m 12s · ↓ 2.0k window · 2.8k spent
     reviewer · running        38s · ↓ 1.1k window · 1.4k spent
 ```
 
-When the focused editor is empty, press `↓` or `←` to expand the summary into `main` plus active children with agent name, state, elapsed time, and token usage. When providers report usage, `window` is the latest assistant turn's input plus cache-read tokens, while `spent` keeps the cumulative input-plus-output total. Old run artifacts without window data keep the existing token-total label. The compact line counts active current-session work and Herdr project panes. Then use `↑`/`↓` or `j`/`k` to select a child and `Enter` to open the Fleet lobby; press `Enter` or `H` there to open its child-specific inspector through an available Inspect plugin. Printable navigation keys are never intercepted before activation.
+When the focused editor is empty, press `↓`, `←`, or `→` to expand the summary into `main` plus active children with agent name, state, elapsed time, and token usage. When providers report usage, `window` is the latest assistant turn's input plus cache-read tokens, while `spent` keeps the cumulative input-plus-output total. Old run artifacts without window data keep the existing token-total label. The compact line counts active current-session work and Herdr project panes. Then use `↑`/`↓` or `j`/`k` to select a child and `→` or `Enter` to open the Fleet lobby; `←` or `Esc` returns to the prompt. In the lobby, press `Enter` or `→` on a live child to compose a steer message inline (or `H` to open its child-specific inspector through an available Inspect plugin). Printable navigation keys are never intercepted before activation.
 
 FleetView and the under-editor async widget are both enabled by default; set `asyncWidget: false` to keep only FleetView. Successful background completions stay quiet so inactive Pi tabs are not marked unread, while failed or paused completions still notify the originating session. Parallel runs show every active child independently. Chains with parallel groups keep their grouped shape in progress and results, so failed or paused agents stay visible next to completed ones. When a child is explicitly allowed to fan out with `tools: subagent` or `allowNestedSubagents: true`, its nested runs appear under that parent child in the main status tree instead of being hidden inside the child session.
 
@@ -110,15 +110,21 @@ Default keys:
 - `PgUp`/`PgDn` — scroll one page
 - `x`/`Ctrl+O` — toggle tool details
 - `r` — refresh
-- `Esc` — close
-- `Enter` — open the selected inspectable async child through the available Inspect plugin
+- `Esc`/`←` — close (left also backs out of the steer composer, stop confirm, and Prompt Audit)
+- `Enter`/`→` — compose a steer message for a live child, or open the inspector for anything else
 - `s` — compose an acknowledged message to a selected live async child; Tab cycles `steer`, `follow_up`, and `auto`
+- `m` — cycle transcript rendering `md` → `md+` → `raw` (single results cap at 16 KB with an elision notice)
 - `D` — stop a selected child's top-level async run after confirmation
 - `H` — open the selected active async child through the available Inspect plugin
+- `@` — mention a live agent to message it, or a type to start it (see below)
 
 Set `fleetKeybindings` in the extension config to replace inspector-level keys when a terminal intercepts keys such as `PgUp`, `PgDn`, `Home`, or `End`. Prompt modes keep fixed keys such as `Esc`, `Enter`, `Tab`, and stop-confirmation `Y`/`N`.
 
 Enter and `H` use the available Inspect plugin. On macOS with Ghostty 1.3+ (TERM_PROGRAM=ghostty), this includes the other bundled open-only plugin using Ghostty's preview AppleScript API; status and close are unavailable because no binding is written. In a child-specific inspector, type ordinary guidance and press Enter to send it through the acknowledged steer channel; `steer <message>`, `status`, and `stop` remain available as explicit controls. The bundled Herdr plugin uses Herdr 0.7.5+.
+
+## Agent mentions
+
+Type `@` to complete a live handle (`@reviewer`, collisions numbered `@reviewer-2`), a resumable finished run (`@scout — resume with message`), or a startable type (`@scout`). A leading `@handle` plus a message never reaches the main model: live agents are steered without restarting, finished runs resume with the message, and types spawn as background children — each confirmed by one notification line. A bare `@handle`, `@main`, unknown handles, inputs with images, and `@src/foo.ts`-style paths stay with the main model (`@main` restarts without its prefix) — `@` remains the file picker first. If dispatch itself throws, the message falls back to the main model with a warning so it is never lost. Full key/behavior contract lives in `docs/claude-parity.md`.
 
 Without a TUI, `/subagents-fleet` retains the textual `subagent({ action: "status", view: "fleet" })` fallback, and mutations use explicit commands: run `/subagents-stop` and pick from the selector, or use `/subagents-stop <run-id>` / `subagent({ action: "stop", id: "..." })` when you already know the id.
 

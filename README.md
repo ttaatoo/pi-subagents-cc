@@ -39,6 +39,12 @@ Use scout to understand this code based on our discussion, then ask me clarifica
 ```
 
 ```text
+@reviewer take another look at the auth change.
+```
+
+Type `@` to complete a live agent handle or a startable type; `→`/`Enter` opens a live child for steering, `←`/`Esc` returns to the prompt. See `docs/claude-parity.md` for the full key contract.
+
+```text
 Run parallel reviewers: one for correctness, one for tests, and one for unnecessary complexity.
 ```
 

@@ -21,6 +21,10 @@ import { keyText, type ExtensionAPI, type ExtensionContext, type ToolDefinition 
 import { Box, Container, Spacer, Text, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Component } from "@earendil-works/pi-tui";
 import { clearAgentDiscoveryCache, discoverAgentSnapshot, discoverAgents, type AgentConfig, type AgentScope } from "../agents/agents.ts";
 import { appendAdvertisedAgentPrompt, buildAdvertisedAgentPrompt } from "../agents/advertised-agent-prompt.ts";
+import { MENTION_ROUTING_BLOCK, MENTION_ROUTING_GUIDANCE } from "../tui/mention.ts";
+import { collectMentionRosterInput, installMentionAutocomplete } from "./mention-provider.ts";
+import { executeMentionRoute, routeMentionInput, type MentionRouteActions } from "./mention-input.ts";
+import { steerAsyncRun } from "../runs/foreground/async-steering-action.ts";
 import { clearRuntimeAgentsForPi, listRuntimeAgentConfigs, mergeRuntimeAgents } from "../agents/runtime-agent-registry.ts";
 import { registerRuntimeAgentEventListener } from "../agents/runtime-agent-events.ts";
 import { ensureAccessibleDir } from "../shared/accessible-dir.ts";
@@ -30,7 +34,7 @@ import { getAgentDir } from "../shared/utils.ts";
 import { isStaleExtensionContextError, withCachedUiContext } from "../shared/extension-context.ts";
 import { currentCompletionOwnerId } from "../shared/completion-owner.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
-import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary, setInlineWorkflowCoverage } from "../tui/render.ts";
+import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary } from "../tui/render.ts";
 import { openSubagentFleet } from "../tui/fleet.ts";
 import { createBuiltinInspectorPlugins } from "../inspectors/plugins.ts";
 import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-status.ts";
@@ -508,7 +512,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 				}
 				throw error;
 			}
-		}, { placement: fleetViewPlacement, onWorkflowCoverageChange: setInlineWorkflowCoverage })
+		}, { placement: fleetViewPlacement })
 		: undefined;
 	let executorScheduled: ((id: string, params: SubagentParamsLike, signal: AbortSignal, ctx: ExtensionContext) => Promise<AgentToolResult<Details>>) | undefined;
 	let goalTurnId = 0;
@@ -824,8 +828,83 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		const advertisedPrompt = Array.isArray(selectedTools) && selectedTools.includes("subagent")
 			? buildAdvertisedAgentPrompt(advertisedAgents, resolveCurrentSubagentCapabilityCeiling(sessionId))
 			: undefined;
-		const systemPrompt = appendAdvertisedAgentPrompt(event.systemPrompt, advertisedPrompt);
+		const withAgents = appendAdvertisedAgentPrompt(event.systemPrompt, advertisedPrompt);
+		const withoutStaleMentions = typeof withAgents === "string" ? withAgents.replace(MENTION_ROUTING_BLOCK, "") : withAgents;
+		// Mention routing is only worth prompt bytes when something is addressable:
+		// advertised types, or a live current-session child. Either way this is an
+		// in-memory check — prompt emission still performs zero filesystem calls.
+		const hasLiveWork = [...state.asyncJobs.values()].some((job) =>
+			(job.status === "running" || job.status === "queued")
+			&& (!sessionId || !job.sessionId || job.sessionId === sessionId));
+		const wantsMentions = Array.isArray(selectedTools) && selectedTools.includes("subagent")
+			&& (advertisedPrompt !== undefined || hasLiveWork);
+		const ADVERTISED_OPEN = "<advertised_subagents>";
+		const advIndex = withoutStaleMentions.indexOf(ADVERTISED_OPEN);
+		// Mention routing sits between the base prompt and the advertised catalog so
+		// the catalog slice (`<advertised_subagents>` to end) keeps its byte budget.
+		const systemPrompt = wantsMentions && typeof withoutStaleMentions === "string" && !withoutStaleMentions.includes("<agent_mentions>")
+			? advIndex >= 0
+				? `${withoutStaleMentions.slice(0, advIndex).trimEnd()}\n\n${MENTION_ROUTING_GUIDANCE}\n\n${withoutStaleMentions.slice(advIndex)}`
+				: `${withoutStaleMentions}\n\n${MENTION_ROUTING_GUIDANCE}`
+			: withoutStaleMentions;
 		if (systemPrompt !== event.systemPrompt) return { systemPrompt };
+	});
+
+	// Direct `@handle` dispatch (Claude Code parity). A leading `@handle message`
+	// send never reaches the main model: live children are steered, resumable
+	// terminal children are resumed, and known types are spawned — all through
+	// the same executor paths as the `subagent` tool. The `@` gesture is explicit
+	// operator authorization, so this bypasses the `subagents_enable` gate.
+	// Anything that must reach the model (bare handles, `@main`, unknown
+	// handles, inputs with images, extension-sourced input) returns continue.
+	// An unexpected throw fails OPEN to the model so the message is never lost;
+	// action-level rejections fail closed (handled + notification).
+	pi.on("input", async (event, ctx) => {
+		const decision = routeMentionInput(
+			{ text: event.text, source: event.source, imageCount: event.images?.length ?? 0 },
+			collectMentionRosterInput(state, advertisedAgents),
+		);
+		if (decision.kind === "continue") return undefined;
+		if (decision.kind === "transform") return { action: "transform", text: decision.text };
+		const signal = new AbortController().signal;
+		const requestId = `mention-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+		const actions: MentionRouteActions = {
+			steer: (entry, message) => steerAsyncRun({
+				state,
+			runId: entry.runId,
+				...(entry.index !== undefined ? { index: entry.index } : {}),
+				message,
+				mode: "steer",
+				location: { asyncDir: entry.asyncDir },
+			}),
+			resume: (entry, message) => executor.executePublic(
+				`${requestId}-resume`,
+				{ action: "resume", id: entry.runId, message } as SubagentParamsLike,
+				signal,
+				undefined,
+				ctx,
+			),
+			spawn: async (agentName, task) => {
+				const result = await executor.executeDelegated(
+					`${requestId}-spawn`,
+					{ agent: agentName, task, async: true } as SubagentParamsLike,
+					signal,
+					undefined,
+					ctx,
+				);
+				const runId = (result.details as { runId?: string; asyncId?: string } | undefined)?.runId
+					?? (result.details as { runId?: string; asyncId?: string } | undefined)?.asyncId;
+				return { ...result, ...(runId ? { runId } : {}) };
+			},
+			notify: (message, type) => ctx.ui.notify(message, type),
+		};
+		try {
+			await executeMentionRoute(decision, actions);
+		} catch (error) {
+			ctx.ui.notify(`@mention dispatch failed (${error instanceof Error ? error.message : String(error)}); sending to the main model instead.`, "warning");
+			return undefined;
+		}
+		return { action: "handled" };
 	});
 
 	registerWaitTool(pi, state, waitToolConfig.enabled, waitSubscriptionManager, waitToolConfig.defaultTimeoutMs, undefined, supervisorChannel.hasPendingRequests);
@@ -1189,6 +1268,10 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => {
 		advertisedContext = { cwd: ctx.cwd, model: ctx.model };
 		refreshAdvertisedAgents();
+		installMentionAutocomplete(ctx, {
+			state,
+			getAdvertisedAgents: () => advertisedAgents,
+		});
 	});
 
 	registerSubagentToolActivation(pi, {
