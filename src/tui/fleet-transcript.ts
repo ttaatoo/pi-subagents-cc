@@ -10,6 +10,42 @@ const DEFAULT_MAX_BYTES = 2 * 1024 * 1024;
 const MAX_MESSAGE_CHARS = 64 * 1024;
 const TOOL_PREVIEW_LINES = 7;
 
+/**
+ * Cap on a single rendered result or tool output before the viewer elides the rest.
+ *
+ * The cap is not cosmetic — it bounds render cost. Transcript body rendering runs
+ * on every keystroke (scroll, mode switch), so an uncapped 200 KB result costs
+ * ~6 ms per keystroke to parse as Markdown, against ~0.5 ms once capped.
+ * 16 KB is roughly a screenful at every terminal size.
+ */
+export const RESULT_MAX_CHARS = 16_000;
+
+/** Cycle order for the viewer's `m` key (Claude Code parity). */
+export const MARKDOWN_MODES = ["off", "assistant", "all"] as const;
+
+export type ViewerMarkdownMode = (typeof MARKDOWN_MODES)[number];
+
+/** Footer labels — short, because the idle footer is already full at 80 columns. */
+export const MARKDOWN_MODE_LABELS: Record<ViewerMarkdownMode, string> = {
+	off: "raw",
+	assistant: "md",
+	all: "md+",
+};
+
+/**
+ * Cap `text` at `RESULT_MAX_CHARS`, reporting the elision separately rather than
+ * appending it. Separately because the notice is the viewer's chrome, not the
+ * tool's output: appended into the string it would render as a line of source
+ * inside a fenced code block.
+ */
+export function capResult(text: string): { text: string; elided: number } {
+	if (text.length <= RESULT_MAX_CHARS) return { text, elided: 0 };
+	return {
+		text: text.slice(0, RESULT_MAX_CHARS),
+		elided: text.length - RESULT_MAX_CHARS,
+	};
+}
+
 function sanitizeJsonDisplayValue(value: unknown): { value: unknown; changed: boolean } {
 	if (typeof value === "string") {
 		const safe = safeDisplayText(value);
@@ -388,15 +424,26 @@ function toolDuration(event: Extract<FleetTranscriptEvent, { kind: "tool" }>): s
 	return `${((event.endedAt - event.startedAt) / 1000).toFixed(1)}s`;
 }
 
+function renderMarkdownText(text: string, width: number, markdownTheme: MarkdownTheme): string[] {
+	return new Markdown(text, 0, 0, markdownTheme).render(Math.max(1, width));
+}
+
+function elisionNotice(elided: number, width: number, theme: Theme): string {
+	return railLine(theme.fg("dim", `  … ${elided} chars elided · m to change view`), width, theme);
+}
+
 function renderExpandedTool(
 	event: Extract<FleetTranscriptEvent, { kind: "tool" }>,
 	width: number,
 	theme: Theme,
+	markdownTheme: MarkdownTheme,
+	markdownMode: ViewerMarkdownMode = "assistant",
 ): string[] {
 	const lines: string[] = [];
 	const args = parseToolArgs(event);
 	const glyph = statusGlyph(event, theme);
-	const output = event.output ?? event.error;
+	const capped = event.output ?? event.error ? capResult(event.output ?? event.error ?? "") : undefined;
+	const output = capped?.text;
 	const outputColor = event.status === "error" ? "error" : "toolOutput";
 	if (event.name === "bash") {
 		const command = jsonScalar(args?.command) ?? event.args ?? "(unknown command)";
@@ -408,6 +455,7 @@ function renderExpandedTool(
 				}
 			}
 		}
+		if (capped && capped.elided > 0) lines.push(elisionNotice(capped.elided, width, theme));
 		const duration = toolDuration(event);
 		if (duration) lines.push(railLine(theme.fg("dim", `  Took ${duration}`), width, theme));
 		return lines;
@@ -426,6 +474,7 @@ function renderExpandedTool(
 		for (const line of rendered) {
 			for (const wrapped of renderWrapped(line, Math.max(1, width - 4))) lines.push(railLine(`  ${wrapped}`, width, theme));
 		}
+		if (capped && capped.elided > 0) lines.push(elisionNotice(capped.elided, width, theme));
 		return lines;
 	}
 	lines.push(railLine(`${glyph} ${theme.fg("toolTitle", theme.bold(event.name))}`, width, theme));
@@ -437,9 +486,16 @@ function renderExpandedTool(
 	}
 	if (output) {
 		lines.push(railLine(theme.fg(event.status === "error" ? "error" : "dim", event.status === "error" ? "  error" : "  output"), width, theme));
-		for (const outputLine of output.split(/\r?\n/)) {
-			for (const wrapped of renderWrapped(theme.fg(outputColor, outputLine), Math.max(1, width - 4))) lines.push(railLine(`  ${wrapped}`, width, theme));
+		if (markdownMode === "all" && event.status !== "error") {
+			for (const markdownLine of renderMarkdownText(output, Math.max(1, width - 4), markdownTheme)) lines.push(railLine(`  ${markdownLine}`, width, theme));
+		} else {
+			for (const outputLine of output.split(/\r?\n/)) {
+				for (const wrapped of renderWrapped(theme.fg(outputColor, outputLine), Math.max(1, width - 4))) {
+					lines.push(railLine(`  ${wrapped}`, width, theme));
+				}
+			}
 		}
+		if (capped && capped.elided > 0) lines.push(railLine(theme.fg("dim", `  … ${capped.elided} chars elided · m to change view`), width, theme));
 	}
 	return lines;
 }
@@ -461,9 +517,10 @@ export function renderFleetTranscript(
 	width: number,
 	theme: Theme,
 	markdownTheme: MarkdownTheme,
-	options: { expandedTools?: boolean } = {},
+	options: { expandedTools?: boolean; markdownMode?: ViewerMarkdownMode } = {},
 ): string[] {
 	if (width <= 0) return [];
+	const markdownMode = options.markdownMode ?? "assistant";
 	const lines: string[] = [];
 	if (transcript.truncated) lines.push(bounded(theme.fg("dim", "↑ Earlier activity omitted"), width));
 	if (transcript.warning) {
@@ -476,7 +533,7 @@ export function renderFleetTranscript(
 		const event = safeTranscriptEvent(rawEvent);
 		if (event.kind === "tool") {
 			if (options.expandedTools && (event.output || event.argsPayload || event.error)) {
-				lines.push(...renderExpandedTool(event, width, theme));
+				lines.push(...renderExpandedTool(event, width, theme, markdownTheme, markdownMode));
 				lines.push(railLine(theme.fg("dim", "  x to collapse"), width, theme));
 				continue;
 			}
@@ -520,14 +577,18 @@ export function renderFleetTranscript(
 		const marker = assistant ? theme.fg("accent", "◆") : theme.fg("warning", "◇");
 		const model = assistant && event.model ? theme.fg("dim", ` · ${event.model}`) : "";
 		lines.push(bounded(`${marker} ${theme.bold(label)}${model}`, width));
-		if (assistant) {
-			const rendered = new Markdown(event.text, 0, 0, markdownTheme).render(Math.max(1, width - 2));
-			for (const markdownLine of rendered) lines.push(railLine(markdownLine, width, theme));
+		const capped = capResult(event.text);
+		const useMarkdown = markdownMode === "all" || (markdownMode === "assistant" && assistant);
+		if (useMarkdown) {
+			for (const markdownLine of renderMarkdownText(capped.text, Math.max(1, width - 2), markdownTheme)) {
+				lines.push(railLine(markdownLine, width, theme));
+			}
 		} else {
-			for (const userLine of renderWrapped(event.text, Math.max(1, width - 2))) {
-				lines.push(railLine(userLine, width, theme));
+			for (const textLine of renderWrapped(capped.text, Math.max(1, width - 2))) {
+				lines.push(railLine(textLine, width, theme));
 			}
 		}
+		if (capped.elided > 0) lines.push(elisionNotice(capped.elided, width, theme));
 		lines.push(theme.fg("borderMuted", "│"));
 	}
 

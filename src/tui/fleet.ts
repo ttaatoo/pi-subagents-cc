@@ -6,7 +6,7 @@ import { matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi, type Compo
 import { snapshotExternalRuns, type ExternalRun } from "../api/external-runs.ts";
 import { getArtifactPaths, getArtifactsDir } from "../shared/artifacts.ts";
 import { formatDuration, formatModelThinking, formatTokens, formatTokenUsage, shortenPath } from "../shared/formatters.ts";
-import { DIRS, type AsyncJobState, type AsyncJobStep, type Details, type FleetKeybindingAction, type FleetKeybindingsConfig, type ForegroundChildControl, type ForegroundResumeChild, type ForegroundResumeRun, type ForegroundRunControl, type SubagentState } from "../shared/types.ts";
+import { DIRS, FLEET_KEYBINDING_ACTIONS, type AsyncJobState, type AsyncJobStep, type Details, type FleetKeybindingAction, type FleetKeybindingsConfig, type ForegroundChildControl, type ForegroundResumeChild, type ForegroundResumeRun, type ForegroundRunControl, type SubagentState } from "../shared/types.ts";
 import { decodeUtf8Tail } from "../shared/utf8.ts";
 import { readStatus } from "../shared/utils.ts";
 import { formatAsyncRunTranscript } from "../runs/background/fleet-view.ts";
@@ -17,9 +17,7 @@ import { stopAsyncRun } from "../runs/foreground/async-stop-action.ts";
 import { resolveWorkflowForegroundSteeringTarget, steerWorkflowForegroundTarget } from "../runs/foreground/workflow-foreground-steering.ts";
 import { contextModeBadge, contextModeLabel } from "../runs/shared/context-mode.ts";
 import { FLEET_STATUS_WIDGET_KEY } from "./fleet-status.ts";
-import { readFleetTranscript, renderFleetTranscript, type FleetTranscript } from "./fleet-transcript.ts";
-import { runningTone } from "./running-tone.ts";
-import { childThinkingLevel, type ThinkingLevel } from "../shared/model-info.ts";
+import { readFleetTranscript, renderFleetTranscript, MARKDOWN_MODES, MARKDOWN_MODE_LABELS, type FleetTranscript, type ViewerMarkdownMode } from "./fleet-transcript.ts";
 import { handleInspectorAction } from "../inspectors/actions.ts";
 import type { InspectorPlugin } from "../inspectors/types.ts";
 import { getLivePromptAudit, type LivePromptAudit, type PromptAuditView } from "../runs/foreground/prompt-audit.ts";
@@ -33,7 +31,9 @@ const OUTPUT_TAIL_BYTES = 64 * 1024;
 const PROMPT_AUDIT_SUMMARY_WIDTH = 160;
 
 export const DEFAULT_FLEET_KEYBINDINGS: Record<FleetKeybindingAction, string[]> = {
-	close: ["escape", "ctrl+c", "q"],
+	// `left` closes like Esc: the composer, stop-confirm, and Prompt Audit branches
+	// above all return before this is reached, so text input there is unaffected.
+	close: ["escape", "ctrl+c", "q", "left"],
 	scrollUp: ["K"],
 	scrollDown: ["J"],
 	selectUp: ["up", "k"],
@@ -44,7 +44,7 @@ export const DEFAULT_FLEET_KEYBINDINGS: Record<FleetKeybindingAction, string[]> 
 	pageDown: ["pageDown"],
 	refresh: ["r", "R"],
 	steer: ["s"],
-	inspect: ["return", "H"],
+	inspect: ["H"],
 	stop: ["D"],
 	toggleTools: ["x", "X", "ctrl+o"],
 };
@@ -64,6 +64,16 @@ function matchesFleetBinding(data: string, binding: string): boolean {
 
 function matchesFleetAction(data: string, bindings: ResolvedFleetKeybindings, action: FleetKeybindingAction): boolean {
 	return bindings[action].some((binding) => matchesFleetBinding(data, binding));
+}
+
+/**
+ * Back-out-one-level key: Esc everywhere, plus the left arrow for Claude
+ * parity (FleetView already treats left as back). Used by the modal branches
+ * (composer, stop-confirm, Prompt Audit); the idle overlay closes through the
+ * configurable `close` binding, whose default now also includes left.
+ */
+function isBackKey(data: string): boolean {
+	return matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || matchesKey(data, "left");
 }
 
 function bindingLabel(bindings: ResolvedFleetKeybindings, action: FleetKeybindingAction): string {
@@ -112,7 +122,7 @@ export interface FleetViewOptions {
 	fleetKeybindings?: FleetKeybindingsConfig;
 	actions?: FleetActionHandlers;
 	copyText?: (text: string) => Promise<void> | void;
-	inspectorPlugins?: () => readonly InspectorPlugin[];
+	inspectorPlugins?: readonly InspectorPlugin[];
 	inspectorEnv?: NodeJS.ProcessEnv;
 }
 
@@ -350,18 +360,8 @@ function visibleWorkflowParentKeyForForegroundKey(state: SubagentState, key: str
 	return undefined;
 }
 
-/** The recorded level of the one child a running Fleet row stands for; a whole run or an external run has none. */
-function fleetItemThinkingLevel(item: FleetItem): ThinkingLevel | undefined {
-	switch (item.kind) {
-		case "foreground-active": return childThinkingLevel(item.activeChild ?? item.control);
-		case "foreground-recent": return childThinkingLevel(item.child);
-		case "async": return childThinkingLevel(item.step);
-		case "external": return undefined;
-	}
-}
-
 function statusGlyph(item: FleetItem, theme: Theme): string {
-	if (item.state === "running") return runningTone(theme, fleetItemThinkingLevel(item))("●");
+	if (item.state === "running") return theme.fg("accent", "●");
 	if (item.state === "queued" || item.state === "pending") return theme.fg("muted", "◦");
 	if (item.state === "complete" || item.state === "completed") return theme.fg("success", "✓");
 	if (item.state === "paused" || item.state === "stopped" || item.state === "detached") return theme.fg("warning", "■");
@@ -766,7 +766,15 @@ function structuredHeader(item: FleetItem, width: number, theme: Theme, conversa
 	if (stats.length) lines.push(`  ${theme.fg("muted", stats.join(" · "))}`);
 	if (promptSummary) lines.push(`  ${theme.fg("muted", `Task: ${promptSummary}`)}`);
 	lines.push(`${theme.fg("accent", "Conversation")} ${theme.fg("dim", `· ${conversationState}`)}`);
-	return lines.map((line) => truncateToWidth(line, width));
+	// The detail pane has vertical room but little width: wrap meta lines
+	// instead of mid-truncating them into "s..."/"w...". Only the title row
+	// stays single-line (rightAligned already protects its state tail).
+	return lines.flatMap((line, index) => {
+		if (index === 0) return [truncateToWidth(line, width)];
+		const wrapped = wrapTextWithAnsi(line, Math.max(1, width));
+		if (!wrapped.length) return [""];
+		return wrapped.map((part, partIndex) => partIndex === 0 ? part : truncateToWidth(`  ${part}`, width));
+	});
 }
 
 function fit(text: string, width: number): string {
@@ -790,6 +798,7 @@ interface FleetTranscriptCache {
 	fingerprint: string;
 	width: number;
 	expandedTools: boolean;
+	markdownMode: ViewerMarkdownMode;
 	transcript: FleetTranscript;
 	body: string[];
 }
@@ -813,6 +822,7 @@ export class SubagentFleetComponent implements Component {
 	private detailViewportHeight = 8;
 	private bodyHeight = 8;
 	private expandedTools = false;
+	private markdownMode: ViewerMarkdownMode = "assistant";
 	private promptAuditOpen = false;
 	private promptAuditView: PromptAuditView = "authored";
 	private actionNotice: FleetActionResult | undefined;
@@ -1035,7 +1045,7 @@ export class SubagentFleetComponent implements Component {
 
 	handleInput(data: string): void {
 		if (this.promptAuditOpen && this.redoGuidanceDraft !== undefined) {
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			if (isBackKey(data)) {
 				this.resetActionInput();
 				this.tui.requestRender();
 				return;
@@ -1066,7 +1076,7 @@ export class SubagentFleetComponent implements Component {
 			return;
 		}
 		if (this.promptAuditOpen) {
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			if (isBackKey(data)) {
 				this.promptAuditOpen = false;
 				this.detailAutoFollow = true;
 				this.tui.requestRender();
@@ -1111,7 +1121,7 @@ export class SubagentFleetComponent implements Component {
 			return;
 		}
 		if (this.steerDraft !== undefined) {
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) {
+			if (isBackKey(data)) {
 				this.resetActionInput();
 				this.tui.requestRender();
 				return;
@@ -1157,7 +1167,7 @@ export class SubagentFleetComponent implements Component {
 				this.runAction(() => Promise.resolve(this.options.actions!.stop({ runId: target.item.runId, asyncDir: target.item.run.asyncDir, ...(target.item.index !== undefined ? { index: target.item.index } : {}) })));
 				return;
 			}
-			if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c") || data.toLowerCase() === "n" || matchesKey(data, "backspace")) {
+			if (isBackKey(data) || data.toLowerCase() === "n" || matchesKey(data, "backspace")) {
 				this.resetActionInput();
 				this.tui.requestRender();
 			}
@@ -1174,6 +1184,19 @@ export class SubagentFleetComponent implements Component {
 		if (matchesFleetAction(data, this.keybindings, "selectDown")) return this.moveSelection(1);
 		if (matchesFleetAction(data, this.keybindings, "selectFirst")) return this.moveSelection(-this.snapshot.items.length);
 		if (matchesFleetAction(data, this.keybindings, "selectLast")) return this.moveSelection(this.snapshot.items.length);
+		if (this.isSmartEnter(data)) {
+			const target = this.selectedSteerAction();
+			if (!("reason" in target) && this.options.actions) {
+				this.actionNotice = undefined;
+			this.steerDraft = "";
+			this.detailAutoFollow = false;
+			this.detailScroll = 0;
+			this.tui.requestRender();
+			} else {
+				this.inspectSelected();
+			}
+			return;
+		}
 		if (matchesFleetAction(data, this.keybindings, "pageUp")) return this.scrollDetail(-this.detailViewportHeight);
 		if (matchesFleetAction(data, this.keybindings, "pageDown")) return this.scrollDetail(this.detailViewportHeight);
 		if (matchesFleetAction(data, this.keybindings, "refresh")) {
@@ -1228,6 +1251,26 @@ export class SubagentFleetComponent implements Component {
 			this.inspectSelected();
 			return;
 		}
+		if (data === "m" && !this.isKeyBound(data)) {
+			this.markdownMode = MARKDOWN_MODES[(MARKDOWN_MODES.indexOf(this.markdownMode) + 1) % MARKDOWN_MODES.length]!;
+			this.transcriptCache = undefined;
+			this.tui.requestRender();
+			return;
+		}
+	}
+
+	private isSmartEnter(data: string): boolean {
+		if (matchesKey(data, "right")) return true;
+		if (matchesKey(data, "return") || data === "\r" || data === "\n") {
+			// A caller-rebound Enter still belongs to its configured action
+			// (e.g. stop: ["return"]); smart-enter only claims an unbound Enter.
+			return !this.isKeyBound(data);
+		}
+		return false;
+	}
+
+	private isKeyBound(data: string): boolean {
+		return FLEET_KEYBINDING_ACTIONS.some((action) => matchesFleetAction(data, this.keybindings, action));
 	}
 
 	private rosterLines(width: number): string[] {
@@ -1250,7 +1293,8 @@ export class SubagentFleetComponent implements Component {
 			&& this.transcriptCache.path === target.path
 			&& this.transcriptCache.fingerprint === fingerprint
 			&& this.transcriptCache.width === width
-			&& this.transcriptCache.expandedTools === this.expandedTools) {
+			&& this.transcriptCache.expandedTools === this.expandedTools
+			&& this.transcriptCache.markdownMode === this.markdownMode) {
 			return { transcript: this.transcriptCache.transcript, body: [...this.transcriptCache.body] };
 		}
 		const transcript = readFleetTranscript(target.path, {
@@ -1259,9 +1303,9 @@ export class SubagentFleetComponent implements Component {
 			...(target.trustedFileRoot ? { trustedFileRoot: target.trustedFileRoot } : {}),
 		});
 		const body = transcript.events.length > 0
-			? renderFleetTranscript(transcript, width, this.theme, this.markdownTheme, { expandedTools: this.expandedTools })
+			? renderFleetTranscript(transcript, width, this.theme, this.markdownTheme, { expandedTools: this.expandedTools, markdownMode: this.markdownMode })
 			: [];
-		this.transcriptCache = { path: target.path, fingerprint, width, expandedTools: this.expandedTools, transcript, body };
+		this.transcriptCache = { path: target.path, fingerprint, width, expandedTools: this.expandedTools, markdownMode: this.markdownMode, transcript, body };
 		return { transcript, body: [...body] };
 	}
 
@@ -1380,7 +1424,7 @@ export class SubagentFleetComponent implements Component {
 			? ` j/k child · 1/2/3 view · g redo with guidance · c copy · Esc close Prompt Audit · ${position}`
 			: selected?.kind === "external"
 				? ` ${bindingLabel(this.keybindings, "selectUp")}/${bindingLabel(this.keybindings, "selectDown")} job · display-only · ${bindingLabel(this.keybindings, "refresh")} refresh · ${bindingLabel(this.keybindings, "close")} close · ${position}`
-				: ` ${bindingLabel(this.keybindings, "selectUp")}/${bindingLabel(this.keybindings, "selectDown")} agent · p Prompt Audit · ${bindingLabel(this.keybindings, "inspect")} Inspect · ${bindingLabel(this.keybindings, "steer")} steer · ${bindingLabel(this.keybindings, "stop")} stop · ${bindingLabel(this.keybindings, "toggleTools")} tools · ${bindingLabel(this.keybindings, "refresh")} refresh · ${bindingLabel(this.keybindings, "close")} close · ${position}`;
+				: ` ${bindingLabel(this.keybindings, "selectUp")}/${bindingLabel(this.keybindings, "selectDown")} agent · p Prompt Audit · enter/→ steer · ${bindingLabel(this.keybindings, "inspect")} inspect · ${bindingLabel(this.keybindings, "steer")} steer · ${bindingLabel(this.keybindings, "stop")} stop · m ${MARKDOWN_MODE_LABELS[this.markdownMode]} · ${bindingLabel(this.keybindings, "toggleTools")} tools · ${bindingLabel(this.keybindings, "refresh")} refresh · ${bindingLabel(this.keybindings, "close")} close · ${position}`;
 		lines.push(this.theme.fg("border", "│") + fit(this.theme.fg("dim", footer), innerWidth) + this.theme.fg("border", "│"));
 		lines.push(this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
 		return lines.map((line) => truncateToWidth(line, width));
@@ -1440,7 +1484,7 @@ export async function openSubagentFleet(ctx: ExtensionContext, state: SubagentSt
 			cwd: state.baseCwd,
 			...(state.authorityPolicy ? { authorityPolicy: state.authorityPolicy } : {}),
 			...(state.missionStoreConfig ? { missions: state.missionStoreConfig } : {}),
-			plugins: options.inspectorPlugins?.(),
+			...(options.inspectorPlugins ? { plugins: options.inspectorPlugins } : {}),
 			...(options.inspectorEnv ? { env: options.inspectorEnv } : {}),
 		}), `Failed to open inspector for async run ${input.runId}.`),
 		redoPrompt: async (input: { runId: string; index: number; guidance: string; control?: ForegroundRunControl }) => {

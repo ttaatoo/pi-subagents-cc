@@ -626,7 +626,7 @@ export function registerSlashCommands(
 		fleetOpen = true;
 		try {
 			const { openSubagentFleet } = await import("../tui/fleet.ts");
-			await openSubagentFleet(ctx, state, { asyncDirRoot: DIRS.async, inspectorPlugins: () => getInspectorPlugins(pi), resultsDir: DIRS.results, fleetKeybindings: options.fleetKeybindings });
+			await openSubagentFleet(ctx, state, { asyncDirRoot: DIRS.async, inspectorPlugins: getInspectorPlugins(pi), resultsDir: DIRS.results, fleetKeybindings: options.fleetKeybindings });
 		} finally {
 			fleetOpen = false;
 		}

@@ -31,7 +31,11 @@ import { getAgentDir } from "../shared/utils.ts";
 import { isStaleExtensionContextError, withCachedUiContext } from "../shared/extension-context.ts";
 import { currentCompletionOwnerId } from "../shared/completion-owner.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
-import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary, setInlineWorkflowCoverage } from "../tui/render.ts";
+import { MENTION_ROUTING_GUIDANCE } from "../tui/mention.ts";
+import { collectMentionRosterInput, installMentionAutocomplete } from "./mention-provider.ts";
+import { executeMentionRoute, routeMentionInput, type MentionRouteActions } from "./mention-input.ts";
+import { steerAsyncRun } from "../runs/foreground/async-steering-action.ts";
+import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary } from "../tui/render.ts";
 import { getInspectorPlugins, registerInspectorEventListener } from "../inspectors/plugins.ts";
 import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-status.ts";
 import { readMainThinkingLevel, setMainThinkingLevelSource } from "../tui/running-tone.ts";
@@ -509,7 +513,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			if (!ctx) return;
 			try {
 				const { openSubagentFleet } = await import("../tui/fleet.ts");
-				await openSubagentFleet(ctx, state, { initialKey: itemKey, asyncDirRoot: DIRS.async, resultsDir: DIRS.results, fleetKeybindings: config.fleetKeybindings, inspectorPlugins: () => getInspectorPlugins(pi) });
+				await openSubagentFleet(ctx, state, { initialKey: itemKey, asyncDirRoot: DIRS.async, resultsDir: DIRS.results, fleetKeybindings: config.fleetKeybindings, inspectorPlugins: getInspectorPlugins(pi) });
 			} catch (error) {
 				if (isStaleExtensionContextError(error)) {
 					if (state.lastUiContext === ctx) state.lastUiContext = null;
@@ -517,7 +521,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 				}
 				throw error;
 			}
-		}, { placement: fleetViewPlacement, onWorkflowCoverageChange: setInlineWorkflowCoverage })
+		}, { placement: fleetViewPlacement })
 		: undefined;
 	let goalTurnId = 0;
 	let releaseHostSessionLiveness = () => {};
@@ -873,6 +877,71 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		// options each turn, and an unset turn records a removal.
 		const catalog = buildAdvertisedAgentCatalog(advertisedAgents, resolveCurrentSubagentCapabilityCeiling(sessionId));
 		if (catalog) event.systemPromptOptions.sections.advertised_subagents = catalog;
+		// Mention routing is only worth prompt bytes when something is addressable:
+		// advertised types, or a live current-session child. In-memory check only.
+		const hasLiveWork = [...state.asyncJobs.values()].some((job) =>
+			(job.status === "running" || job.status === "queued")
+			&& (!sessionId || !job.sessionId || job.sessionId === sessionId));
+		if (catalog !== undefined || hasLiveWork) {
+			// Sections API adds the tag from the key, so strip the wrapper.
+			const body = MENTION_ROUTING_GUIDANCE.replace(/^<agent_mentions>\n/, "").replace(/\n<\/agent_mentions>$/, "");
+			event.systemPromptOptions.sections.agent_mentions = body;
+		} else {
+			delete event.systemPromptOptions.sections.agent_mentions;
+		}
+	});
+
+	// Direct `@handle` dispatch (Claude Code parity). A leading `@handle message`
+	// send never reaches the main model: live children are steered, resumable
+	// terminal children are resumed, and known types are spawned — all through
+	// the same executor paths as the `subagent` tool. The `@` gesture is explicit
+	// operator authorization, so this bypasses the `subagents_enable` gate.
+	pi.on("input", async (event, ctx) => {
+		const decision = routeMentionInput(
+			{ text: event.text, source: event.source, imageCount: event.images?.length ?? 0 },
+			collectMentionRosterInput(state, advertisedAgents),
+		);
+		if (decision.kind === "continue") return undefined;
+		if (decision.kind === "transform") return { action: "transform", text: decision.text };
+		const signal = new AbortController().signal;
+		const requestId = `mention-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+		const actions: MentionRouteActions = {
+			steer: (entry, message) => steerAsyncRun({
+				state,
+				runId: entry.runId,
+				...(entry.index !== undefined ? { index: entry.index } : {}),
+				message,
+				mode: "steer",
+				location: { asyncDir: entry.asyncDir },
+			}),
+			resume: (entry, message) => getExecutor().then((executor) => executor.executePublic(
+				`${requestId}-resume`,
+				{ action: "resume", id: entry.runId, message } as SubagentParamsLike,
+				signal,
+				undefined,
+				ctx,
+			)),
+			spawn: async (agentName, task) => {
+				const result = await (await getExecutor()).executeDelegated(
+					`${requestId}-spawn`,
+					{ agent: agentName, task, async: true } as SubagentParamsLike,
+					signal,
+					undefined,
+					ctx,
+				);
+				const runId = (result.details as { runId?: string; asyncId?: string } | undefined)?.runId
+					?? (result.details as { runId?: string; asyncId?: string } | undefined)?.asyncId;
+				return { ...result, ...(runId ? { runId } : {}) };
+			},
+			notify: (message, type) => ctx.ui.notify(message, type),
+		};
+		try {
+			await executeMentionRoute(decision, actions);
+		} catch (error) {
+			ctx.ui.notify(`@mention dispatch failed (${error instanceof Error ? error.message : String(error)}); sending to the main model instead.`, "warning");
+			return undefined;
+		}
+		return { action: "handled" };
 	});
 
 	registerWaitTool(pi, state, waitToolConfig.enabled, waitSubscriptionManager, waitToolConfig.defaultTimeoutMs, undefined, supervisorChannel.hasPendingRequests);
@@ -1236,7 +1305,13 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	// Child processes and Herdr panes never load this module; in-process children have no UI.
 	pi.on("session_start", (_event, ctx) => void showUpgradeNotice(ctx).catch((error) => console.error("Failed to show the pi-subagents upgrade notice:", error)));
-	pi.on("session_start", (_event, ctx) => beginAdvertisement(ctx));
+	pi.on("session_start", (_event, ctx) => {
+		beginAdvertisement(ctx);
+		installMentionAutocomplete(ctx, {
+			state,
+			getAdvertisedAgents: () => advertisedAgents,
+		});
+	});
 
 	registerSubagentToolActivation(pi, {
 		advertisedPrompt: async () => {
