@@ -2,17 +2,20 @@
 
 ## [pi-subagents-cc]
 
-Fork entries. Upstream history below is kept as-is for provenance. Upstream sync point: `8dc90dca` (#2534).
+Fork entries. Upstream history below is kept as-is for provenance. Upstream sync point: `964481f4` (#2585), selective; skipped items are listed in FORK.md.
 
 ### Added
 
 - `@handle` message dispatch (Claude Code parity, presentation layer only): a leading `@handle` plus a message never reaches the main model. Live children are steered, finished runs resume with the message, and advertised types spawn as background children, each confirmed by one notification line. Bare handles, `@main`, unknown handles, inputs with images, and `@path`-style picks stay with the main model. Contract: `docs/claude-parity.md`.
 - Fleet inspector smart-`Enter`/`→`: opens the inline steer composer for a live child (`Enter` sends, `Tab` cycles steer/follow_up/auto, `Esc`/`←` backs out), otherwise opens the external inspector. `inspect` default key is now `H` only.
 - `m` cycles transcript rendering `md` → `md+` → `raw`; single results cap at 16 KB with an elision notice.
+- `@mention` is fail-closed with session-local handles: handles bind to run identity (not sort position), completion and dispatch share one roster snapshot, file completion is preserved, stopped/foreign/workflow-root/external work is never offered as steerable/resumable, steer uses the public action without implicit recovery, and known handles are always consumed (never replayed to the main model).
+- Upstream safety/lifecycle sync (selective to `964481f4`): undici 8.10.2, project-trust inheritance, inheritSkills enforcement, user-stop descendants, reload-stopped reuse, sibling-stopped states, retention/compaction recovery, revived-child latest run, and watchdog/retention/supervisor perf fixes.
+- Simplified-Fleet visibility proof (`test/unit/fleet-visibility.test.ts`): concurrent workflows, nested children, and foreground work stay addressable; terminal runs are not presented as active; overflow is windowed, not hidden; Fleet/mention projection over 200 jobs stays within budget and the prompt footprint is recorded as a baseline.
 
 ### Changed
 
-- Identity: package `pi-subagents` → `pi-subagents-cc`, installer bin `pi-subagents-cc`, install dir `~/.pi/agent/extensions/subagent-cc`, installed via `pi install https://github.com/ttaatoo/pi-subagents-cc` (never collides with upstream).
+- Identity: package `pi-subagents-cc`, installed/removed through Pi's Git package manager (`pi install` / `pi remove https://github.com/ttaatoo/pi-subagents-cc`); no standalone installer, bin, or npm release. Public imports are `pi-subagents-cc/<subpath>` with no old-name alias.
 - Running rows use the accent tone everywhere; thinking-level spinner colors are removed.
 - FleetView lists live work only; inline workflow coverage, workflow/project-pane rows, and nested-children expansion now live in the inspector.
 - Safety guidance: "thorough"/"in-depth" wording is not delegation authorization, the blocking critical path stays local, and the tracked task is marked in_progress at async launch. Worded to stay inside the activated schema budget (23866/24000).

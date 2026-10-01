@@ -10,7 +10,7 @@ Independent fork (omp-style: **not** created via GitHub's fork button, no upstre
 ## Base commit
 
 - `nicobailon/pi-subagents@a859d1de` — `fix(runner): strip inherited Git routing environment (#2440)`, 2026-09-23. Package version at fork time: `0.70.1`.
-- Upstream sync point: `8dc90dca` (`feat(agents): allow advertise through agentOverrides (#2534)`). The `sync/upstream-*` branches replay the cc layer below on top of upstream; full upstream history lives upstream.
+- Upstream sync point: `964481f4` (`fix(workflows): show a revived workflow child as its key's latest run (#2585)`), selective. Applied: MCP hash align, compaction-abort recovery, retention reclaim, inheritSkills skills drop, reload-stopped reuse, undici 8.10.2, agent fixture root, watchdog/retention/supervisor perf, Herdr coordinator count, sibling-stopped states, project-trust inheritance, user-stop descendants, schema anchor, revived-child latest run. Intentionally skipped: scoped-model token, disable-features config, deslop refactor, built-in MCP support, codemode registration, MCP-adapter priority (needs the skipped MCP feat), and the two progressive-widget TUI fixes (lanes/agent-count conflict with this fork's inspector-owned Fleet simplification). The `sync/upstream-*` branches replay the cc layer below on top of upstream; full upstream history lives upstream.
 - Full upstream history lives upstream; this repo starts fresh with the tree at that commit plus the fork branding below.
 
 ## What this fork changes (vs upstream)
