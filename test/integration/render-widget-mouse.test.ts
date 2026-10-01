@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { it } from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderWidget, setInlineWorkflowCoverage } from "../../src/tui/render.ts";
+import { renderWidget } from "../../src/tui/render.ts";
 import type { AsyncJobState } from "../../src/shared/types.ts";
 
 it("toggles only the async header and retains live status without changing global expansion", () => {
@@ -59,8 +59,6 @@ it("toggles only the async header and retains live status without changing globa
 		assert.equal(registrations, 1, "progress updates retain the mounted widget");
 		for (const text of ["1/6 running", "1 failed", "1 queued", "1 paused", "1 partial", "1 rejected"]) assert.ok(lines()[0]!.includes(text));
 		assert.ok(visibleWidth(lines(15)[0]!) <= 15);
-		// SAFETY: coverage uses this UI object only as a WeakMap key and invokes its registered invalidator.
-		setInlineWorkflowCoverage(ctx.ui as never, new Map([["a", "changed"]]));
 		assert.equal(lines().length, 1);
 		widget!.handleMouse(click);
 		assert.ok(lines().length > 1);
