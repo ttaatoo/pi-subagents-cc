@@ -1,10 +1,10 @@
 import type { AutocompleteProvider, AutocompleteSuggestions } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { SubagentState } from "../shared/types.ts";
-import type { MentionRosterInput } from "./mention-input.ts";
-import { MENTION_TRIGGER, buildMentionRoster, type MentionLiveEntry } from "../tui/mention.ts";
+import { MENTION_TRIGGER, MentionRoster, type MentionLiveEntry, type MentionRosterSnapshot } from "../tui/mention.ts";
 
 const MAX_MENTION_SUGGESTIONS = 8;
+const rosters = new WeakMap<SubagentState, { sessionId: string | null | undefined; roster: MentionRoster }>();
 
 export interface MentionAgentInfo {
 	name: string;
@@ -15,134 +15,82 @@ export interface MentionAgentInfo {
 
 export interface MentionProviderDeps {
 	state: SubagentState;
-	/** Minimal agent shape — the roster only reads name/description/advertise/disabled. */
 	getAdvertisedAgents: () => ReadonlyArray<MentionAgentInfo>;
 }
 
-function jobAgentLabel(job: { agents?: string[]; steps?: Array<{ agent: string }>; mode?: string }): string {
-	return job.agents?.[0] ?? job.steps?.[0]?.agent ?? job.mode ?? "agent";
-}
-
-function jobEntryForMention(job: { asyncId: string; asyncDir: string; status: string; agents?: string[]; steps?: Array<{ agent: string; index?: number }>; mode?: string }): MentionLiveEntry {
-	const entry: MentionLiveEntry = {
-		runId: job.asyncId,
-		asyncDir: job.asyncDir,
-		agent: jobAgentLabel(job),
-		state: job.status,
-	};
-	const stepIndex = job.steps?.[0]?.index;
-	if (stepIndex !== undefined) entry.index = stepIndex;
-	return entry;
-}
-
-function sameSession(state: SubagentState, jobSessionId: string | undefined): boolean {
-	return !state.currentSessionId || !jobSessionId || jobSessionId === state.currentSessionId;
-}
-
-function liveEntriesForMention(state: SubagentState): MentionLiveEntry[] {
-	const entries: MentionLiveEntry[] = [];
-	for (const job of state.asyncJobs.values()) {
-		if (job.status !== "running" && job.status !== "queued") continue;
-		if (!sameSession(state, job.sessionId)) continue;
-		entries.push(jobEntryForMention(job));
+/** Memory-only projection; execution still performs authoritative ownership and capability checks. */
+export function collectMentionRoster(state: SubagentState, agents: ReadonlyArray<MentionAgentInfo>): MentionRosterSnapshot {
+	let cached = rosters.get(state);
+	if (!cached || cached.sessionId !== state.currentSessionId) {
+		cached = { sessionId: state.currentSessionId, roster: new MentionRoster() };
+		rosters.set(state, cached);
 	}
-	return entries;
-}
-
-/**
- * Terminal direct children the input router may resume. In-memory only (no
- * filesystem scan): workflow owners resume through their workflow, so only
- * non-workflow runs are candidates — resume still checks eligibility
- * authoritatively and may reject.
- */
-export function resumableEntriesForMention(state: SubagentState): MentionLiveEntry[] {
-	const entries: MentionLiveEntry[] = [];
+	const live: MentionLiveEntry[] = [], resumable: MentionLiveEntry[] = [], unavailable: MentionLiveEntry[] = [];
+	const sameSession = (id: string | undefined) => Boolean(state.currentSessionId && id === state.currentSessionId);
 	for (const job of state.asyncJobs.values()) {
-		if (job.status !== "complete" && job.status !== "failed" && job.status !== "paused" && job.status !== "stopped") continue;
-		if (job.mode === "workflow" || job.parentWorkflowRunId) continue;
-		if (!sameSession(state, job.sessionId)) continue;
-		entries.push(jobEntryForMention(job));
+		if (!sameSession(job.sessionId) || job.mode === "workflow") continue;
+		const steps = job.steps?.length ? job.steps : (job.agents?.length === 1
+			? [{ agent: job.agents[0]!, status: job.status, index: 0 }]
+			: []);
+		for (const [offset, step] of steps.entries()) {
+			const entry: MentionLiveEntry = { source: "async", runId: job.asyncId, index: step.index ?? offset, agent: step.agent, state: step.status };
+			const native = !("runner" in step && step.runner) && !("externalJob" in step && step.externalJob) && !("externalProcess" in step && step.externalProcess);
+			const active = (job.status === "running" || job.status === "queued") && (step.status === "running" || step.status === "pending");
+			const terminal = ["complete", "completed", "failed", "partial", "paused"].includes(step.status);
+			const sessionFile = ("sessionFile" in step && step.sessionFile) || (steps.length === 1 && job.sessionFile);
+			if (native && active && !job.stopped) live.push(entry);
+			else if (native && terminal && sessionFile && job.status !== "stopped" && !job.stopped && !job.parentWorkflowRunId
+				&& job.status !== "running" && job.status !== "queued") resumable.push(entry);
+			else unavailable.push(entry);
+		}
 	}
-	return entries;
+	// The public steer action supports exact workflow-owned foreground children.
+	// Ordinary foreground and external work remain controllable through Fleet, not a guessed mention route.
+	for (const control of state.foregroundControls?.values() ?? []) {
+		if (!sameSession(control.sessionId) || !control.parentWorkflowRunId || !state.workflowControllers?.has(control.parentWorkflowRunId)) continue;
+		for (const child of control.activeChildren?.values() ?? []) {
+			if (child.steer) live.push({ source: "foreground", runId: control.runId, index: child.index, agent: child.agent, state: "running" });
+		}
+	}
+	return cached.roster.build(live, resumable, agents.filter((agent) => agent.advertise === true && !agent.disabled), unavailable);
 }
 
-/**
- * The single source of roster inputs for completion AND the input router.
- * Both read the same live/resumable/type lists so the popup and the
- * dispatcher never disagree about what a handle addresses.
- */
-export function collectMentionRosterInput(state: SubagentState, agents: ReadonlyArray<MentionAgentInfo>): MentionRosterInput {
-	return {
-		live: liveEntriesForMention(state),
-		resumable: resumableEntriesForMention(state),
-		types: agents
-			.filter((agent) => agent.advertise === true && agent.disabled !== true)
-			.map((agent) => ({ name: agent.name, description: agent.description })),
-	};
-}
-
-export function createMentionAutocompleteProvider(
-	current: AutocompleteProvider,
-	deps: MentionProviderDeps,
-): AutocompleteProvider {
+export function createMentionAutocompleteProvider(current: AutocompleteProvider, deps: MentionProviderDeps): AutocompleteProvider {
 	return {
 		async getSuggestions(lines, cursorLine, cursorCol, options): Promise<AutocompleteSuggestions | null> {
-			const currentLine = lines[cursorLine] ?? "";
-			const match = MENTION_TRIGGER.exec(currentLine.slice(0, cursorCol));
+			const match = MENTION_TRIGGER.exec((lines[cursorLine] ?? "").slice(0, cursorCol));
 			if (!match) return current.getSuggestions(lines, cursorLine, cursorCol, options);
 			const token = (match[2] ?? "").toLowerCase();
-			const rosterInput = collectMentionRosterInput(deps.state, deps.getAdvertisedAgents());
-			const roster = buildMentionRoster(rosterInput.live, rosterInput.resumable, rosterInput.types)
-				.filter((target) => target.handle.toLowerCase().startsWith(token))
+			// Preserve the host's file picker, including a file whose name is an agent handle.
+			const files = await current.getSuggestions(lines, cursorLine, cursorCol, options);
+			if (options.signal.aborted) return null;
+			const roster = collectMentionRoster(deps.state, deps.getAdvertisedAgents()).targets
+				.filter((target) => target.kind !== "unavailable" && target.handle.startsWith(token))
 				.slice(0, MAX_MENTION_SUGGESTIONS);
-			if (options.signal.aborted || roster.length === 0) {
-				return current.getSuggestions(lines, cursorLine, cursorCol, options);
-		}
-			return {
-				items: roster.map((target) => target.kind === "live"
-					? {
-						value: `@${target.handle}`,
-						label: `@${target.handle}`,
-						description: `${target.entry.agent} · ${target.entry.state} — message without restarting`,
-					}
-					: target.kind === "resumable"
-						? {
-							value: `@${target.handle}`,
-							label: `@${target.handle}`,
-							description: `${target.entry.agent} · ${target.entry.state} — resume with message`,
-						}
-						: {
-							value: `@${target.handle}`,
-							label: `@${target.handle}`,
-							description: `start ${target.name} — ${target.description}`,
-						}),
-				prefix: `@${match[2] ?? ""}`,
-			};
+			if (!roster.length) return files;
+			const prefix = `@${match[2] ?? ""}`;
+			// Different replacement spans cannot be safely merged. Keep real file results.
+			if (files?.items.length && files.prefix !== prefix) return files;
+			const items = files?.items.slice() ?? [];
+			for (const target of roster) {
+				if (items.some((item) => item.value === `@${target.handle}`)) continue;
+				items.push({
+					value: `@${target.handle}`, label: `@${target.handle}`,
+					description: target.kind === "type" ? `start ${target.name} — ${target.description}`
+						: `${target.entry.agent} · ${target.entry.state} — ${target.kind === "resumable" ? "resume" : "message"} run ${target.entry.runId} child ${target.entry.index}`,
+				});
+			}
+			return { items, prefix };
 		},
-
 		applyCompletion(lines, cursorLine, cursorCol, item, prefix) {
 			return current.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
 		},
-
 		shouldTriggerFileCompletion(lines, cursorLine, cursorCol) {
 			return current.shouldTriggerFileCompletion?.(lines, cursorLine, cursorCol) ?? true;
 		},
 	};
 }
 
-/**
- * Wire the `@handle` completion provider for one session. Call from the
- * existing `session_start` handler (not as a new `pi.on` registration) so the
- * handler count observed by lifecycle tests stays stable. Additive: `@` stays
- * pi's file picker first — agent rows are offered only when a handle token
- * matches, and everything else falls through to the wrapped provider untouched.
- */
-export function installMentionAutocomplete(
-	ctx: Pick<ExtensionContext, "hasUI" | "ui">,
-	deps: MentionProviderDeps,
-): void {
-	if (!ctx.hasUI) return;
-	// Older hosts predate addAutocompleteProvider; optional chaining keeps this
-	// a no-op there instead of a crash.
-	ctx.ui.addAutocompleteProvider?.((current) => createMentionAutocompleteProvider(current, deps));
+export function installMentionAutocomplete(ctx: Pick<ExtensionContext, "hasUI" | "ui">, deps: MentionProviderDeps): void {
+	if (ctx.hasUI) ctx.ui.addAutocompleteProvider?.((current) => createMentionAutocompleteProvider(current, deps));
 }

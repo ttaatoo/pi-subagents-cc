@@ -32,9 +32,8 @@ import { isStaleExtensionContextError, withCachedUiContext } from "../shared/ext
 import { currentCompletionOwnerId } from "../shared/completion-owner.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
 import { MENTION_ROUTING_GUIDANCE } from "../tui/mention.ts";
-import { collectMentionRosterInput, installMentionAutocomplete } from "./mention-provider.ts";
+import { collectMentionRoster, installMentionAutocomplete } from "./mention-provider.ts";
 import { executeMentionRoute, routeMentionInput, type MentionRouteActions } from "./mention-input.ts";
-import { steerAsyncRun } from "../runs/foreground/async-steering-action.ts";
 import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary } from "../tui/render.ts";
 import { getInspectorPlugins, registerInspectorEventListener } from "../inspectors/plugins.ts";
 import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-status.ts";
@@ -881,7 +880,9 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		// advertised types, or a live current-session child. In-memory check only.
 		const hasLiveWork = [...state.asyncJobs.values()].some((job) =>
 			(job.status === "running" || job.status === "queued")
-			&& (!sessionId || !job.sessionId || job.sessionId === sessionId));
+			&& (!sessionId || !job.sessionId || job.sessionId === sessionId))
+			|| [...(state.foregroundControls?.values() ?? [])].some((control) =>
+				control.sessionId === sessionId && (control.activeChildren?.size ?? 0) > 0);
 		if (catalog !== undefined || hasLiveWork) {
 			// Sections API adds the tag from the key, so strip the wrapper.
 			const body = MENTION_ROUTING_GUIDANCE.replace(/^<agent_mentions>\n/, "").replace(/\n<\/agent_mentions>$/, "");
@@ -899,24 +900,23 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	pi.on("input", async (event, ctx) => {
 		const decision = routeMentionInput(
 			{ text: event.text, source: event.source, imageCount: event.images?.length ?? 0 },
-			collectMentionRosterInput(state, advertisedAgents),
+			collectMentionRoster(state, advertisedAgents),
 		);
 		if (decision.kind === "continue") return undefined;
 		if (decision.kind === "transform") return { action: "transform", text: decision.text };
 		const signal = new AbortController().signal;
 		const requestId = `mention-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
 		const actions: MentionRouteActions = {
-			steer: (entry, message) => steerAsyncRun({
-				state,
-				runId: entry.runId,
-				...(entry.index !== undefined ? { index: entry.index } : {}),
-				message,
-				mode: "steer",
-				location: { asyncDir: entry.asyncDir },
-			}),
+			steer: (entry, message) => getExecutor().then((executor) => executor.executePublic(
+				`${requestId}-steer`,
+				{ action: "steer", id: entry.runId, index: entry.index, message, mode: "steer", steeringRecovery: false } as SubagentParamsLike,
+				signal,
+				undefined,
+				ctx,
+			)),
 			resume: (entry, message) => getExecutor().then((executor) => executor.executePublic(
 				`${requestId}-resume`,
-				{ action: "resume", id: entry.runId, message } as SubagentParamsLike,
+				{ action: "resume", id: entry.runId, index: entry.index, message } as SubagentParamsLike,
 				signal,
 				undefined,
 				ctx,
@@ -935,13 +935,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			},
 			notify: (message, type) => ctx.ui.notify(message, type),
 		};
-		try {
-			await executeMentionRoute(decision, actions);
-		} catch (error) {
-			ctx.ui.notify(`@mention dispatch failed (${error instanceof Error ? error.message : String(error)}); sending to the main model instead.`, "warning");
-			return undefined;
-		}
-		return { action: "handled" };
+		return executeMentionRoute(decision, actions);
 	});
 
 	registerWaitTool(pi, state, waitToolConfig.enabled, waitSubscriptionManager, waitToolConfig.defaultTimeoutMs, undefined, supervisorChannel.hasPendingRequests);

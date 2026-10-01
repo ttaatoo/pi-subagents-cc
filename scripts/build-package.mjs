@@ -6,7 +6,6 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const output = path.join(root, "dist-pkg");
 const expectedRootModules = [
-	"install.mjs",
 	"runner-peer-preload.mjs",
 	"runner-peer-loader.mjs",
 	"inspector-runner.mjs",
@@ -54,12 +53,13 @@ for (const relativePath of expectedDirectories) {
 }
 
 const sourcePackage = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
-if (sourcePackage.private !== true) throw new Error("The source package must remain private; publish only ./dist-pkg");
+if (sourcePackage.private !== true) throw new Error("This Git-distributed fork must remain private");
 const copyFields = [
 	"name", "version", "description", "author", "license", "repository", "homepage", "bugs",
 	"bin", "dependencies", "peerDependencies", "peerDependenciesMeta", "engines", "keywords",
 ];
-const publishedPackage = { type: sourcePackage.type };
+// Compiled artifacts support local installation and smoke tests, not npm publication.
+const publishedPackage = { type: sourcePackage.type, private: true };
 for (const field of copyFields) {
 	if (sourcePackage[field] !== undefined) publishedPackage[field] = sourcePackage[field];
 }

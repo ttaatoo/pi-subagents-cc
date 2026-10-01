@@ -5,7 +5,7 @@ Independent fork (omp-style: **not** created via GitHub's fork button, no upstre
 ## Credits
 
 - Base / upstream: [`nicobailon/pi-subagents`](https://github.com/nicobailon/pi-subagents) by Nico Bailon (MIT). All core delegation, workflow orchestration, supervision, and observability work belongs there.
-- Claude Code style: [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) by tintinweb (MIT) — Claude Code-style autonomous sub-agent conventions (`Agent`, `get_subagent_result`, `steer_subagent`), FleetView/conversation-viewer/agent-mention UX language, and the `SubagentWorkflow` `agent()/parallel()/pipeline()` scripting shape this fork's user-facing style follows.
+- Claude Code style: [`tintinweb/pi-subagents`](https://github.com/tintinweb/pi-subagents) by tintinweb (MIT) — FleetView, conversation-viewer, agent mentions, and keyboard interaction. This fork does not adopt its tool names or workflow DSL.
 
 ## Base commit
 
@@ -15,12 +15,12 @@ Independent fork (omp-style: **not** created via GitHub's fork button, no upstre
 
 ## What this fork changes (vs upstream)
 
-1. Identity: package `pi-subagents` → `pi-subagents-cc`, installer bin `pi-subagents-cc`, install dir `~/.pi/agent/extensions/subagent-cc` (no collision with upstream installs), install via `pi install https://github.com/ttaatoo/pi-subagents-cc`.
+1. Identity: package `pi-subagents-cc`, installed and removed through Pi's Git package manager: `pi install https://github.com/ttaatoo/pi-subagents-cc` / `pi remove https://github.com/ttaatoo/pi-subagents-cc`. There is no standalone installer/bin or npm publication workflow; source and compiled smoke artifacts are private. Public imports use `pi-subagents-cc/<subpath>` with no old-name alias. Tools, event protocols, and run storage retain the upstream contract, so enable only one of upstream and this fork in a session.
 2. Claude Code parity at the presentation layer only (contract: `docs/claude-parity.md`); no second execution path — `@handle` dispatch reuses the existing steer/resume/spawn paths, per `VISION.md` one operator, one delegation layer:
    - `@mention` routing (`src/tui/mention.ts`, `src/extension/mention-input.ts`, `src/extension/mention-provider.ts`): live → steer, resumable → resume, advertised type → spawn; bare/`@main`/unknown/image/extension input stays with the main model.
    - Fleet inspector: smart-`Enter`/`→` opens the inline steer composer for live children (else external inspector); `inspect` default is `H` only; `Esc`/`←` backs out of composer, stop-confirm, and Prompt Audit; `m` cycles transcript `md` → `md+` → `raw` with a 16 KB per-result cap.
    - FleetView simplified: running rows use `accent` (no thinking-level colors); inline workflow coverage, workflow/project-pane rows, and nested-children expansion are removed in favor of the inspector.
-3. `README.md` fork banner + this file; `LICENSE` keeps the upstream MIT notice and appends the fork copyright line.
+3. `README.md` fork banner + this file; `LICENSE` preserves the upstream MIT notice.
 
 ## What this fork does NOT change
 

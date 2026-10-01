@@ -1,5 +1,7 @@
 # pi-subagents-cc 横向调研与 TUI 优化方案报告
 
+> 历史研究：以下缺口与建议针对 2026-09-23 / `a859d1de`，不是当前能力清单。当前交互契约见 [claude-parity.md](claude-parity.md)，后续复查见 [竞品分析](research-pi-workflow-competitive-analysis.md)。
+
 > 目标：broadly 学习 `grok-build / codex / omp(oh-my-pi) / claude-code / amp / claw-code / opencode / hermes-agent` + `tintinweb/pi-subagents` 的做法，给出 `pi-subagents-cc` 应该怎么做。约束：`VISION.md`（一个 operator、一个 delegation layer、compose before inventing、无第二执行路径），偏好：Claude Code CLI 的 TUI 交互（以 tintinweb 的移植为蓝本）。
 > 调研时间：2026-09-23；基线：`pi-subagents-cc = nicobailon/pi-subagents@a859d1de (0.70.1)` 单 commit fork；tintinweb 基线 `@tintinweb/pi-subagents@0.19.0`。
 

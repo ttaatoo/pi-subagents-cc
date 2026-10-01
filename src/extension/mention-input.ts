@@ -1,57 +1,28 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Details } from "../shared/types.ts";
-import {
-	buildMentionRoster,
-	isReservedHandle,
-	parseMentionSend,
-	resolveMentionTarget,
-	type MentionLiveEntry,
-	type MentionTarget,
-} from "../tui/mention.ts";
+import { isReservedHandle, parseMentionSend, type MentionLiveEntry, type MentionRosterSnapshot, type MentionTarget } from "../tui/mention.ts";
 
 export type MentionRouteInput = {
 	text: string;
-	/** Where the input came from. Extension-sourced input is never rerouted. */
 	source: "interactive" | "rpc" | "extension";
 	imageCount: number;
-};
-
-export type MentionRosterInput = {
-	live: readonly MentionLiveEntry[];
-	resumable: readonly MentionLiveEntry[];
-	types: readonly { name: string; description: string }[];
 };
 
 export type MentionRouteDecision =
 	| { kind: "continue" }
 	| { kind: "transform"; text: string }
-	| { kind: "steer"; target: MentionTarget & { kind: "live" }; message: string }
-	| { kind: "resume"; target: MentionTarget & { kind: "resumable" }; message: string }
+	| { kind: "steer" | "resume" | "blocked"; target: Exclude<MentionTarget, { kind: "type" }>; message: string }
 	| { kind: "spawn"; agentName: string; task: string };
 
-/**
- * Pure routing for a leading `@handle message` send. Returns `continue` for
- * everything that must reach the main model: non-interactive plumbing,
- * inputs with images (steer is text-only), bare handles, `@main`, and unknown
- * handles. Known handles resolve against the SAME roster inputs as completion
- * so the popup and the router never disagree.
- */
-export function routeMentionInput(input: MentionRouteInput, rosterInput: MentionRosterInput): MentionRouteDecision {
-	if (input.source === "extension") return { kind: "continue" };
-	if (input.imageCount > 0) return { kind: "continue" };
+export function routeMentionInput(input: MentionRouteInput, roster: MentionRosterSnapshot): MentionRouteDecision {
+	if (input.source === "extension" || input.imageCount > 0) return { kind: "continue" };
 	const send = parseMentionSend(input.text);
 	if (!send) return { kind: "continue" };
-	if (isReservedHandle(send.handle)) {
-		const rest = send.message.trim();
-		if (!rest) return { kind: "continue" };
-		return { kind: "transform", text: rest };
-	}
-	const roster = buildMentionRoster(rosterInput.live, rosterInput.resumable, rosterInput.types);
-	const target = resolveMentionTarget(roster, send.handle);
+	if (isReservedHandle(send.handle)) return { kind: "transform", text: send.message.trim() };
+	const target = roster.resolve(send.handle);
 	if (!target) return { kind: "continue" };
-	if (target.kind === "live") return { kind: "steer", target, message: send.message };
-	if (target.kind === "resumable") return { kind: "resume", target, message: send.message };
-	return { kind: "spawn", agentName: target.name, task: send.message };
+	if (target.kind === "type") return { kind: "spawn", agentName: target.name, task: send.message };
+	return { kind: target.kind === "live" ? "steer" : target.kind === "resumable" ? "resume" : "blocked", target, message: send.message };
 }
 
 export type MentionRouteActions = {
@@ -61,47 +32,30 @@ export type MentionRouteActions = {
 	notify: (message: string, type?: "info" | "warning" | "error") => void;
 };
 
-function resultText(result: AgentToolResult<Details> | null, fallback: string) {
-	const text = result?.content.find((item) => item.type === "text")?.text.trim() || fallback;
-	const [firstLine] = text.split("\n");
-	const bounded = (firstLine ?? text).slice(0, 200);
-	return { text: bounded, isError: result?.isError === true };
-}
-
-/**
- * Execute a non-continue decision and report back in one user-visible line.
- * A steer that fails because the child raced to completion retries once as a
- * resume with the same message, so the message is never silently dropped.
- */
+/** A known-handle input is always consumed, even when execution or notification fails. */
 export async function executeMentionRoute(
 	decision: Exclude<MentionRouteDecision, { kind: "continue" } | { kind: "transform" }>,
 	actions: MentionRouteActions,
-): Promise<void> {
-	if (decision.kind === "steer") {
-		const steered = resultText(await actions.steer(decision.target.entry, decision.message), "Steering failed.");
-		if (!steered.isError) {
-			actions.notify(`@${decision.target.handle} — ${steered.text}`, "info");
-			return;
-		}
-		const resumed = resultText(await actions.resume(decision.target.entry, decision.message), "Resume failed.");
-		actions.notify(
-			resumed.isError
-				? `@${decision.target.handle} — steer failed (${steered.text}); resume failed (${resumed.text})`
-				: `@${decision.target.handle} — finished mid-send; resumed: ${resumed.text}`,
-			resumed.isError ? "error" : "info",
-		);
-		return;
+): Promise<{ action: "handled" }> {
+	const label = decision.kind === "spawn" ? `@${decision.agentName}` : `@${decision.target.handle}`;
+	const notify = (message: string, type: "info" | "error") => {
+		try { actions.notify(message, type); }
+		catch { console.error("[pi-subagents-cc] @mention notification failed; input remains handled. Inspect run status before retrying."); }
+	};
+	if (decision.kind === "blocked") {
+		notify(`${label} cannot control run ${decision.target.entry.runId} child ${decision.target.entry.index}. Inspect it through Fleet/status; no message or replacement was sent.`, "error");
+		return { action: "handled" };
 	}
-	if (decision.kind === "resume") {
-		const resumed = resultText(await actions.resume(decision.target.entry, decision.message), "Resume failed.");
-		actions.notify(`@${decision.target.handle} — ${resumed.text}`, resumed.isError ? "error" : "info");
-		return;
+	try {
+		const result = decision.kind === "spawn" ? await actions.spawn(decision.agentName, decision.task)
+			: decision.kind === "steer" ? await actions.steer(decision.target.entry, decision.message)
+				: await actions.resume(decision.target.entry, decision.message);
+		const text = (result.content.find((item) => item.type === "text")?.text.trim().split("\n")[0] || "Inspect run status for the outcome.").slice(0, 200);
+		const runId = "runId" in result && typeof result.runId === "string" ? result.runId : result.details.asyncId;
+		notify(decision.kind === "spawn" && !result.isError && runId ? `${label} started as run ${runId}.` : `${label} — ${text}`, result.isError ? "error" : "info");
+	} catch (error) {
+		const target = decision.kind === "spawn" ? decision.agentName : `run ${decision.target.entry.runId} child ${decision.target.entry.index}`;
+		notify(`${label} dispatch failed; outcome may be unknown for ${target}. Inspect Fleet/status before retrying. No automatic resume or main-model replay. ${String(error instanceof Error ? error.message : error).slice(0, 200)}`, "error");
 	}
-	const spawned = await actions.spawn(decision.agentName, decision.task);
-	const runId = spawned.runId ?? /run\s+([A-Za-z0-9_-]+)/.exec(resultText(spawned, "").text)?.[1];
-	const outcome = resultText(spawned, "Launch failed.");
-	actions.notify(
-		outcome.isError ? `@${decision.agentName} — ${outcome.text}` : `@${decision.agentName} started${runId ? ` as run ${runId}` : ""}.`,
-		outcome.isError ? "error" : "info",
-	);
+	return { action: "handled" };
 }

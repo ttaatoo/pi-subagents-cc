@@ -1,8 +1,8 @@
 {
-  "name": "pi-subagents",
+  "name": "pi-subagents-cc",
   "version": "0.73.1",
   "private": true,
-  "description": "Pi extension for single-agent delegation and scripted multi-agent workflows",
+  "description": "Pi delegation and scripted workflows with Claude Code-style interaction",
   "author": "Nico Bailon",
   "license": "MIT",
   "type": "module",
@@ -26,11 +26,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/nicobailon/pi-subagents.git"
+    "url": "git+https://github.com/ttaatoo/pi-subagents-cc.git"
   },
-  "homepage": "https://github.com/nicobailon/pi-subagents#readme",
+  "homepage": "https://github.com/ttaatoo/pi-subagents-cc#readme",
   "bugs": {
-    "url": "https://github.com/nicobailon/pi-subagents/issues"
+    "url": "https://github.com/ttaatoo/pi-subagents-cc/issues"
   },
   "keywords": [
     "pi-package",
@@ -41,9 +41,6 @@
     "agents",
     "cli"
   ],
-  "bin": {
-    "pi-subagents": "install.mjs"
-  },
   "files": [
     "index.ts",
     "src/**/*.ts",
