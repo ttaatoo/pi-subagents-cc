@@ -1,5 +1,30 @@
 # Changelog
 
+## [pi-subagents-cc]
+
+Fork entries. Upstream history below is kept as-is for provenance. Upstream sync point: `ad11b7ab` (v0.76.1), full-tree sync with per-item verdicts in FORK.md.
+
+### Breaking
+
+- Workflow scripts move to the upstream #2588 contract: `workflow: true` runs the single ```js workflow` block written in the same reply, a string containing `/` loads a script file from the request cwd, and any other string names a workflow resource. `workflowScript` and `workflowScriptPath` are gone, with no compatibility shims (fork policy: hard cutover). The script-free `tasks`/`chain` inputs are always available.
+
+### Added
+
+- `@handle` message dispatch (Claude Code parity, presentation layer only): a leading `@handle` plus a message never reaches the main model. Live children are steered, finished runs resume with the message, and advertised types spawn as background children, each confirmed by one notification line. Bare handles, `@main`, unknown handles, inputs with images, and `@path`-style picks stay with the main model. Contract: `docs/claude-parity.md`.
+- Fleet inspector smart-`Enter`/`→`: opens the inline steer composer for a live child (`Enter` sends, `Tab` cycles steer/follow_up/auto, `Esc`/`←` backs out), otherwise opens the external inspector. `inspect` default key is now `H` only.
+- `m` cycles transcript rendering `md` → `md+` → `raw`; single results cap at 16 KB with an elision notice.
+- `@mention` is fail-closed with session-local handles: handles bind to run identity (not sort position), completion and dispatch share one roster snapshot, file completion is preserved, stopped/foreign/workflow-root/external work is never offered as steerable/resumable, steer uses the public action without implicit recovery, and known handles are always consumed (never replayed to the main model).
+- Upstream features adopted with this sync: unified `[subagent]` message blocks (#2753), async widget collapse and one-line-per-run layout (#2621/#2738), provider/model displays (#2734), bundled tmux inspector (#2719), OSC 7501 program status (#2725), runner launchers (#2577/#2720), daily/weekly zoned schedules (#2656), worktree cleanup apply (#2655), child command supervision (#2598), script-free chain/tasks (#2596), built-in MCP direct tools (#2555), scoped-model `scoped` token (#2538).
+- Skipped, with rationale in FORK.md: the `disabledFeatures` config surface (this fork ships one delegation surface) and codemode registration (no codemode integration here). Fleet/widget progressive-lane fixes stay fork-simplified pending the TUI rebuild.
+
+### Changed
+
+- Identity: package `pi-subagents-cc`, installed/removed through Pi's Git package manager (`pi install` / `pi remove https://github.com/ttaatoo/pi-subagents-cc`); no standalone installer, bin, or npm release. Public imports are `pi-subagents-cc/<subpath>` with no old-name alias.
+- Running rows use the accent tone everywhere; thinking-level spinner colors are removed.
+- FleetView lists live work only; inline workflow coverage, workflow/project-pane rows, and nested-children expansion now live in the inspector.
+- Safety guidance: "thorough"/"in-depth" wording is not delegation authorization, the blocking critical path stays local, and the tracked task is marked in_progress at async launch.
+
+
 ## [Unreleased]
 
 ### Added

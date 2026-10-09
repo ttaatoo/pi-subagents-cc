@@ -10,6 +10,7 @@ const versionNumber = (version: unknown) => typeof version === "string" && /^\d+
 	? version.split(".").reduce((total, part) => total * 1e6 + Number(part), 0)
 	: undefined;
 
+/** Notifies the Highlights of every version since the last one seen. Never enters the conversation. */
 export async function showUpgradeNotice(
 	ctx: { hasUI: boolean; ui: { notify(message: string, type: "info"): void } },
 	stateDir = path.join(getAgentDir(), "pi-subagents"),
@@ -32,9 +33,9 @@ export async function showUpgradeNotice(
 		return (highlights.match(/^- .*/gm) ?? []).map((bullet) => bullet.replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").trim());
 	});
 	ctx.ui.notify([
-		`pi-subagents updated from ${lastSeen} to ${version}`,
+		`${packageJson.name} updated from ${lastSeen} to ${version}`,
 		...bullets.slice(0, 5),
 		...(bullets.length > 5 ? [`...and ${bullets.length - 5} more`] : []),
-		"Changelog: https://github.com/nicobailon/pi-subagents/blob/main/CHANGELOG.md",
+		"Changelog: https://github.com/ttaatoo/pi-subagents-cc/blob/main/CHANGELOG.md",
 	].join("\n"), "info");
 }

@@ -3,7 +3,6 @@
  */
 
 import { Type } from "typebox";
-import type { DisabledFeatureSurface } from "../shared/disabled-features.ts";
 import { MAX_ARGS_BYTES, MAX_ARGS_DEPTH, MAX_ARGS_FIELDS, MAX_ARGS_ITEMS } from "../workflows/workflow-resources.ts";
 
 function keepTopLevelParameterDescriptions<T>(schema: T): T {
@@ -227,6 +226,18 @@ const SubagentParamProperties = {
 	globalConcurrencyLimit: Type.Optional(Type.Integer({ minimum: 1 })),
 	maxSubagentSpawnsPerRun: Type.Optional(Type.Integer({ minimum: 1 })),
 	preflight: Type.Optional(WorkflowPreflightOverride),
+	// Simple orchestration inputs, always available alongside `workflow`: tasks runs
+	// children in parallel, chain runs steps in order ({task}/{previous}/{outputs.name}).
+	// Each is compiled to a package-owned workflow script; the executor validates
+	// step shapes and placeholders strictly.
+	tasks: Type.Optional(Type.Unsafe({ type: "array", minItems: 1, items: { type: "object", properties: { agent: { type: "string", minLength: 1 }, task: { type: "string" } }, required: ["agent", "task"], additionalProperties: false }, description: "Parallel children: [{agent, task}]; results in order." })),
+	chain: Type.Optional(Type.Unsafe({
+		type: "array",
+		minItems: 1,
+		// Flattened step: {agent, task?, as?} or {parallel}; no object-shape union for provider converters.
+		items: { type: "object", properties: { agent: { type: "string", minLength: 1 }, task: { type: "string" }, as: { type: "string" }, parallel: { type: "array", minItems: 1, items: { type: "object", properties: { agent: { type: "string", minLength: 1 }, task: { type: "string" } }, required: ["agent", "task"], additionalProperties: false } } }, additionalProperties: false },
+		description: "Sequential steps: {agent,task?,as?} or {parallel:[{agent,task}]}.",
+	})),
 	chatProgress: Type.Optional(Type.String({ enum: ["auto", "off", "live-card"], description: "auto: live card only for watched foreground in same Git repository. live-card requires same-repo async:false; async: omit or auto/off." })),
 	isolation: Type.Optional(Type.String({ enum: ["none", "worktree"], description: "Shared cwd or managed git worktrees." })),
 	worktree: Type.Optional(Type.Boolean({ description: "Isolate each workflow child in a managed git worktree; child worktree:false overrides default." })),
@@ -281,33 +292,8 @@ const SubagentParamsSchema = Type.Object(SubagentParamProperties);
 
 export const SubagentParams = keepTopLevelParameterDescriptions(SubagentParamsSchema);
 
-// Replaces workflow scripts when disabledFeatures lists "workflow-scripts". Kept small because every
-// field is sent on every request; the executor validates step shapes and placeholders strictly.
-const StructuredTask = { type: "object", properties: { agent: { type: "string", minLength: 1 }, task: { type: "string" } }, required: ["agent", "task"], additionalProperties: false };
-const StructuredWorkflowProperties = {
-	action: Type.Optional(Type.String({ minLength: 1, description: "Management/control only; omit for execution. Discover actions with guide topic tool-reference." })),
-	task: Type.Optional(Type.String({ description: "One-child task with agent, or the original request ({task}) with chain/tasks." })),
-	tasks: Type.Optional(Type.Unsafe({ type: "array", minItems: 1, items: StructuredTask, description: "Parallel children; results in order." })),
-	// Flattened step: {agent, task?, as?} or {parallel}; no object-shape union for provider converters.
-	chain: Type.Optional(Type.Unsafe({
-		type: "array",
-		minItems: 1,
-		items: { type: "object", properties: { agent: { type: "string", minLength: 1 }, task: { type: "string" }, as: { type: "string" }, parallel: { type: "array", minItems: 1, items: StructuredTask } }, additionalProperties: false },
-		description: "Sequential steps: {agent,task?,as?} or {parallel:[{agent,task}]}.",
-	})),
-};
-
-export function createSubagentParamsSchema(disabled?: DisabledFeatureSurface): typeof SubagentParams {
-	if (!disabled || disabled.params.size === 0) return SubagentParams;
-	const structured = disabled.features.has("workflow-scripts");
-	const enabledProperties = Object.fromEntries(Object.entries(SubagentParamProperties).flatMap(([name, schema]) => {
-		if (disabled.params.has(name)) return [];
-		if (structured && name === "action") return [[name, StructuredWorkflowProperties.action]];
-		if (structured && name === "task") return [[name, StructuredWorkflowProperties.task], ["tasks", StructuredWorkflowProperties.tasks], ["chain", StructuredWorkflowProperties.chain]];
-		return [[name, schema]];
-	}));
-	// SAFETY: only optional properties are dropped or added; the executor rejects disabled options and admits chain/tasks at runtime.
-	return keepTopLevelParameterDescriptions(Type.Object(enabledProperties)) as typeof SubagentParams;
+export function createSubagentParamsSchema(): typeof SubagentParams {
+	return SubagentParams;
 }
 
 const SubagentWaitParamsSchema = Type.Object({

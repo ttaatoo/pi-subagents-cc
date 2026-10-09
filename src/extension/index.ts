@@ -31,12 +31,14 @@ import { getAgentDir } from "../shared/utils.ts";
 import { isStaleExtensionContextError, MODEL_ONLY_TOOL, withCachedUiContext } from "../shared/extension-context.ts";
 import { currentCompletionOwnerId } from "../shared/completion-owner.ts";
 import { cleanupOldChainDirs } from "../shared/settings.ts";
-import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary, setInlineWorkflowCoverage } from "../tui/render.ts";
+import { MENTION_ROUTING_GUIDANCE } from "../tui/mention.ts";
+import { collectMentionRoster, installMentionAutocomplete } from "./mention-provider.ts";
+import { executeMentionRoute, routeMentionInput, type MentionRouteActions } from "./mention-input.ts";
+import { clearLegacyResultAnimationTimer, renderSubagentResult, renderSubagentSummary } from "../tui/render.ts";
 import { getInspectorPlugins, registerInspectorEventListener } from "../inspectors/plugins.ts";
 import { SubagentFleetStatus, resolveFleetViewPlacement } from "../tui/fleet-status.ts";
 import { readMainThinkingLevel, setMainThinkingLevelSource } from "../tui/running-tone.ts";
 import { createSubagentParamsSchema } from "./schemas.ts";
-import { resolveDisabledFeatureSurface } from "../shared/disabled-features.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { createAsyncJobTracker } from "../runs/background/async-job-tracker.ts";
 import { getActiveAsyncCapacitySnapshot, resolveAbandonedSlotReleaseAfterMs, resolveMaxActiveAsyncRunsPerSession } from "../runs/background/active-async-capacity.ts";
@@ -371,7 +373,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 			if (!ctx) return;
 			try {
 				const { openSubagentFleet } = await import("../tui/fleet.ts");
-				await openSubagentFleet(ctx, state, { initialKey: itemKey, asyncDirRoot: DIRS.async, resultsDir: DIRS.results, fleetKeybindings: config.fleetKeybindings, inspectorPlugins: () => getInspectorPlugins(pi) });
+				await openSubagentFleet(ctx, state, { initialKey: itemKey, asyncDirRoot: DIRS.async, resultsDir: DIRS.results, fleetKeybindings: config.fleetKeybindings, inspectorPlugins: getInspectorPlugins(pi) });
 			} catch (error) {
 				if (isStaleExtensionContextError(error)) {
 					if (state.lastUiContext === ctx) state.lastUiContext = null;
@@ -379,7 +381,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 				}
 				throw error;
 			}
-		}, { placement: fleetViewPlacement, onWorkflowCoverageChange: setInlineWorkflowCoverage })
+		}, { placement: fleetViewPlacement })
 		: undefined;
 	let goalTurnId = 0;
 	let releaseHostSessionLiveness = () => {};
@@ -646,23 +648,21 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		},
 	});
 
-	const disabledFeatures = resolveDisabledFeatureSurface(config);
 	const rpcBridge = registerSubagentRpcBridge({
 		events: pi.events,
 		getContext: () => state.lastUiContext,
 		execute: executeSubagentReady,
 		state,
-		disabledFeatures,
 	});
 
 
-	const parameters = createSubagentParamsSchema(disabledFeatures);
+	const parameters = createSubagentParamsSchema();
 	const tool: ToolDefinition<typeof parameters, Details> = {
 		name: "subagent",
 		...MODEL_ONLY_TOOL,
 		label: "Subagent",
-		description: buildSubagentToolDescription(config, { disabledFeatures }),
-		...buildSubagentToolPromptMetadata(config, disabledFeatures),
+		description: buildSubagentToolDescription(config),
+		...buildSubagentToolPromptMetadata(config),
 		parameters,
 
 		async execute(id, params, signal, onUpdate, ctx) {
@@ -716,6 +716,66 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 		// options each turn, and an unset turn records a removal.
 		const catalog = buildAdvertisedAgentCatalog(advertisedAgents, resolveCurrentSubagentCapabilityCeiling(sessionId));
 		if (catalog) event.systemPromptOptions.sections.advertised_subagents = catalog;
+		// Mention routing is only worth prompt bytes when something is addressable:
+		// advertised types, or a live current-session child. In-memory check only.
+		const hasLiveWork = [...state.asyncJobs.values()].some((job) =>
+			(job.status === "running" || job.status === "queued")
+			&& (!sessionId || !job.sessionId || job.sessionId === sessionId))
+			|| [...(state.foregroundControls?.values() ?? [])].some((control) =>
+				control.sessionId === sessionId && (control.activeChildren?.size ?? 0) > 0);
+		if (catalog !== undefined || hasLiveWork) {
+			// Sections API adds the tag from the key, so strip the wrapper.
+			const body = MENTION_ROUTING_GUIDANCE.replace(/^<agent_mentions>\n/, "").replace(/\n<\/agent_mentions>$/, "");
+			event.systemPromptOptions.sections.agent_mentions = body;
+		} else {
+			delete event.systemPromptOptions.sections.agent_mentions;
+		}
+	});
+
+	// Direct `@handle` dispatch (Claude Code parity). A leading `@handle message`
+	// send never reaches the main model: live children are steered, resumable
+	// terminal children are resumed, and known types are spawned — all through
+	// the same executor paths as the `subagent` tool. The `@` gesture is explicit
+	// operator authorization, so this bypasses the `subagents_enable` gate.
+	pi.on("input", async (event, ctx) => {
+		const decision = routeMentionInput(
+			{ text: event.text, source: event.source, imageCount: event.images?.length ?? 0 },
+			collectMentionRoster(state, advertisedAgents),
+		);
+		if (decision.kind === "continue") return undefined;
+		if (decision.kind === "transform") return { action: "transform", text: decision.text };
+		const signal = new AbortController().signal;
+		const requestId = `mention-${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
+		const actions: MentionRouteActions = {
+			steer: (entry, message) => getExecutor().then((executor) => executor.executePublic(
+				`${requestId}-steer`,
+				{ action: "steer", id: entry.runId, index: entry.index, message, mode: "steer", steeringRecovery: false } as SubagentParamsLike,
+				signal,
+				undefined,
+				ctx,
+			)),
+			resume: (entry, message) => getExecutor().then((executor) => executor.executePublic(
+				`${requestId}-resume`,
+				{ action: "resume", id: entry.runId, index: entry.index, message } as SubagentParamsLike,
+				signal,
+				undefined,
+				ctx,
+			)),
+			spawn: async (agentName, task) => {
+				const result = await (await getExecutor()).executeDelegated(
+					`${requestId}-spawn`,
+					{ agent: agentName, task, async: true } as SubagentParamsLike,
+					signal,
+					undefined,
+					ctx,
+				);
+				const runId = (result.details as { runId?: string; asyncId?: string } | undefined)?.runId
+					?? (result.details as { runId?: string; asyncId?: string } | undefined)?.asyncId;
+				return { ...result, ...(runId ? { runId } : {}) };
+			},
+			notify: (message, type) => ctx.ui.notify(message, type),
+		};
+		return executeMentionRoute(decision, actions);
 	});
 
 	registerWaitTool(pi, state, waitToolConfig.enabled, waitSubscriptionManager, waitToolConfig.defaultTimeoutMs, undefined, supervisorChannel.hasPendingRequests);
@@ -752,7 +812,7 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 	const disposeSlashCommands = registerSlashCommands(pi, state, {
 		fleetKeybindings: config.fleetKeybindings,
 		foregroundDetachShortcut: config.foregroundDetachShortcut,
-		workflowScriptsDisabled: disabledFeatures.features.has("workflow-scripts"),
+		workflowScriptsDisabled: false,
 	});
 
 	let visibleControlNotices = new Set<string>();
@@ -1109,7 +1169,13 @@ export default function registerSubagentExtension(pi: ExtensionAPI): void {
 
 	// Child processes and Herdr panes never load this module; in-process children have no UI.
 	pi.on("session_start", (_event, ctx) => void showUpgradeNotice(ctx).catch((error) => console.error("Failed to show the pi-subagents upgrade notice:", error)));
-	pi.on("session_start", (_event, ctx) => beginAdvertisement(ctx));
+	pi.on("session_start", (_event, ctx) => {
+		beginAdvertisement(ctx);
+		installMentionAutocomplete(ctx, {
+			state,
+			getAdvertisedAgents: () => advertisedAgents,
+		});
+	});
 
 	registerSubagentToolActivation(pi, {
 		mode: config.toolActivation,

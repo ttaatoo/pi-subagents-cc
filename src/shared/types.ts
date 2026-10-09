@@ -12,7 +12,6 @@ import type { ModelScopeRule } from "../runs/shared/model-scope.ts";
 import type { ResolvedSubagentCapabilityCeiling, SubagentCapabilityAudit } from "../runs/shared/capability-ceiling.ts";
 import type { AuthorityPolicyConfig } from "../policy/authority.ts";
 import type { ThinkingLevel } from "./model-info.ts";
-import type { SubagentFeature } from "./disabled-features.ts";
 import type { GlobalMissionIndexRecord, MissionRecord, MissionStoreConfig } from "../missions/types.ts";
 import type { ExtensionBindings } from "../runs/shared/extension-bindings.ts";
 import type { WorkflowChildPermitContext } from "./workflow-child-permit.ts";
@@ -2703,8 +2702,6 @@ export interface ExtensionConfig {
 	toolDescriptionMode?: ToolDescriptionMode;
 	/** How a new parent session offers the subagent tool. Defaults to auto. */
 	toolActivation?: ToolActivationMode;
-	/** Opt-in feature groups removed from the subagent tool schema and rejected at every execution boundary. */
-	disabledFeatures?: SubagentFeature[];
 	/** Inline chat rendering for the subagent tool. Defaults to rich. */
 	inlineToolDisplay?: InlineToolDisplay;
 	/** Density controls for the main chat subagent call/result renderer. */

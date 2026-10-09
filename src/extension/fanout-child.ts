@@ -13,7 +13,6 @@ import { createNativeSupervisorChannel, NATIVE_SUPERVISOR_TOOL_NAME, resolveSupe
 import { readStatus } from "../shared/utils.ts";
 import { resolveSubagentIntercomTarget } from "../intercom/intercom-bridge.ts";
 import { createSubagentParamsSchema } from "./schemas.ts";
-import { resolveDisabledFeatureSurface } from "../shared/disabled-features.ts";
 import { finalizeToolResult } from "./tool-result.ts";
 import { removedModelWorkflowFieldError } from "./public-execution.ts";
 import { loadConfig, resolveAsyncByDefault } from "./config.ts";
@@ -213,18 +212,15 @@ export default function registerFanoutChildSubagentExtension(pi: ExtensionAPI, c
 		findPendingAsks: supervisorChannel.findPendingAsks,
 	});
 
-	const disabledFeatures = resolveDisabledFeatureSurface(config);
-	const listEnabled = (actions: string[]) => actions.filter((action) => !disabledFeatures.actions.has(action)).join(", ");
-	const blockedActions = listEnabled(["create", "update", "delete", "eject", "disable", "enable", "reset", "grant-spawn-budget", "lane.recordMerge", "lane.recordSupersession"]);
-	const params = createSubagentParamsSchema(disabledFeatures);
+	const params = createSubagentParamsSchema();
 	const tool: ToolDefinition<typeof params, Details> = {
 		name: "subagent",
 		...MODEL_ONLY_TOOL,
 		label: "Subagent",
 		description: [
 			"Delegate to subagents from child-safe fanout mode.",
-			`Allowed management/control actions: ${listEnabled(["list", "get", "status", "lane.status", "interrupt", "resume", "steer", "doctor"])}.`,
-			...(blockedActions ? [`Mutating management actions (${blockedActions}) are blocked in this mode.`] : []),
+			"Allowed management/control actions: list, get, status, lane.status, interrupt, resume, steer, doctor.",
+			"Mutating management actions (create, update, delete, eject, disable, enable, reset, grant-spawn-budget, lane.recordMerge, lane.recordSupersession) are blocked in this mode.",
 		].join("\n"),
 		parameters: params,
 		async execute(id, params, signal, onUpdate, ctx) {

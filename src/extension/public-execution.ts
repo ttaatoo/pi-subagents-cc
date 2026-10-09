@@ -187,8 +187,9 @@ export function normalizePublicSubagentExecution<T extends PublicSubagentExecuti
 			return { ok: false, error: "Pass either tasks or chain, not both.", mode: "workflow" };
 		}
 		const field = params.tasks !== undefined ? "tasks" : "chain";
-		// workflow and workflowScript were already rejected by the workflow-scripts feature check.
-		for (const [name, value] of [["action", params.action], ["agent", params.agent], ["step", params.step]] as const) {
+		// This fork admits tasks/chain unconditionally, so reject a combined workflow source here
+		// instead of the upstream workflow-scripts feature check.
+		for (const [name, value] of [["action", params.action], ["agent", params.agent], ["step", params.step], ["workflow", params.workflow], ["workflowScript", params.workflowScript]] as const) {
 			if (value !== undefined) return { ok: false, error: `${field} cannot be combined with ${name}.`, mode: normalizedAction ? "management" : "workflow" };
 		}
 		return { ok: true, params };

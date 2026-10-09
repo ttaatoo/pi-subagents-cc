@@ -170,7 +170,7 @@ describe("nested widget rendering", () => {
 		assert.notEqual(widgetRenderKey(first), widgetRenderKey(renamed));
 	});
 
-	it("colors running nested rows by the thinking level of the child each stands for", () => {
+	it("renders running nested rows with accent", () => {
 		const toneTheme = {
 			fg: (name: string, text: string) => `⟦${name}⟧${text}⟦/⟧`,
 			bold: (text: string) => text,
@@ -182,7 +182,7 @@ describe("nested widget rendering", () => {
 		});
 		const lines = buildWidgetLines([job(child)], toneTheme as any, 160, true);
 		const glyphTone = (label: string) => lines.find((line) => line.includes(label))?.match(/⟦([^⟧]+)⟧[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●]⟦\/⟧/)?.[1];
-		assert.equal(glyphTone("leaf-run"), "thinking:xhigh");
-		assert.equal(glyphTone("step-agent"), "thinking:minimal");
+		assert.equal(glyphTone("leaf-run"), "accent");
+		assert.equal(glyphTone("step-agent"), "accent");
 	});
 });

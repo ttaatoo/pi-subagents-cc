@@ -57,3 +57,7 @@ PI_CODING_AGENT_DIR="$(mktemp -d)" "$release_dir/pi/pi" \
 This command targets a source checkout. The published npm package uses the compiled `index.js` entry instead.
 
 Configure a provider in that isolated session, ask for a read-only background child and inspect its notification/run artifacts. This loads only the checkout for that process; it does not install the candidate or reuse normal credentials. Keep the parent alive for notifications.
+
+## Model ids for background children
+
+The detached child runner resolves the model through Pi's catalog, not the parent's in-process provider. An id served only through `vercel-ai-gateway` fails the child launch with a gateway-key error even when the parent session works. Use an id the selected provider serves natively (verified live: `--provider zai --model "zai/glm-5.3"`; the gateway-only alias `zai/glm-4.5` fails at child launch).

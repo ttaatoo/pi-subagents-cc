@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { writeAtomicJson } from "../../shared/atomic-json.ts";
 import type { AsyncStatus } from "../../shared/types.ts";
-import { readMissionBinding, type MissionLaunchBinding } from "../../missions/lifecycle.ts";
+import { MISSION_BINDING_FILE, readMissionBinding, type MissionLaunchBinding } from "../../missions/lifecycle.ts";
 import { MissionNotFoundError, readMission } from "../../missions/store.ts";
 import type { MissionStatus } from "../../missions/types.ts";
 import { REVIVAL_ORIGIN_FILE } from "../../workflows/workflow-revival.ts";
@@ -215,10 +215,16 @@ function missionObserverIndexExists(resultsDir: string, runId: string): boolean 
 	return fs.existsSync(path.join(resultsDir, "result-index", "observers", "mission", `${encodeIndexSegment(runId)}.json`));
 }
 
-// The retention window doubles as a terminal mission's grace period. Unreadable references and
-// pending syncs are kept because the watcher needs the run's binding to retry.
+/**
+ * Mission-bound runs are reclaimable once their mission is terminal (the run age
+ * window doubles as the grace period) or once the mission record was pruned by
+ * mission retention. A pending mission observer index, worn bindings, and
+ * unreadable records fail closed.
+ */
 function missionReferenceBlocksReclaim(runDir: string, resultsDir: string, runId: string): boolean {
+	// The watcher needs the run's binding to retry a pending mission sync.
 	if (missionObserverIndexExists(resultsDir, runId)) return true;
+	if (!fs.existsSync(path.join(runDir, MISSION_BINDING_FILE))) return false;
 	let binding: MissionLaunchBinding | undefined;
 	try {
 		binding = readMissionBinding(runDir);
@@ -230,7 +236,8 @@ function missionReferenceBlocksReclaim(runDir: string, resultsDir: string, runId
 		const mission = readMission(binding.location, binding.missionId);
 		return !TERMINAL_MISSION_STATUSES.has(mission.status);
 	} catch (error) {
-		return !(error instanceof MissionNotFoundError);
+		if (error instanceof MissionNotFoundError) return false;
+		return true;
 	}
 }
 
