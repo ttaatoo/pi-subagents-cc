@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
-import { awaitExistingAsyncRun } from "../../src/runs/background/await-async-run.ts";
+import { awaitExistingAsyncRun, claimWorkflowAwaitedResult } from "../../src/runs/background/await-async-run.ts";
+import { resultFilesForToolCall, resultPayloadPathForIndexedRun, resultPayloadPathForSessionRun, retireResultSnapshot, withResultRunLease, writeAsyncResultFile, writePendingAsyncResultFile } from "../../src/runs/background/result-files.ts";
 
 let tempDir: string;
 
@@ -70,7 +72,7 @@ describe("awaitExistingAsyncRun", () => {
 		assert.equal(outcome.status === "settled" && outcome.result.output, "finished output");
 		assert.equal(outcome.status === "settled" && outcome.result.success, true);
 		assert.equal(outcome.status === "settled" && outcome.result.exitCode, 0);
-		assert.deepEqual(outcome.status === "settled" && outcome.result.importedPublication, { sessionId: "session-a", toolCallId: "tool-call-a" });
+		assert.deepEqual(outcome.status === "settled" && outcome.result.importedPublication, { sessionId: "session-a", toolCallId: "tool-call-a", snapshot: before[1]!.toString("utf-8") });
 		files.forEach((file, index) => assert.deepEqual(fs.readFileSync(file), before[index], file));
 	});
 
@@ -128,6 +130,59 @@ describe("awaitExistingAsyncRun", () => {
 		assert.equal(JSON.parse(fs.readFileSync(path.join(asyncDir, "status.json"), "utf-8")).state, "running");
 	});
 
+	it("ends a zombie wait only when the runner's PID namespace is verified", { skip: process.platform !== "linux", timeout: 10_000 }, async () => {
+		const script = String.raw`
+			const { spawn } = require("node:child_process");
+			const fs = require("node:fs");
+			const child = spawn(process.execPath, ["-e", 'process.title = "pi) zombie"; process.exit(0);'], { stdio: "ignore" });
+			process.stdout.write(String(child.pid) + "\n");
+			fs.readSync(0, Buffer.alloc(1), 0, 1, null);
+		`;
+		const parent = spawn(process.execPath, ["--eval", script], { stdio: ["pipe", "pipe", "pipe"] });
+		const closed = once(parent, "close");
+		parent.stdin.on("error", () => {});
+		try {
+			const [output] = await once(parent.stdout, "data", { signal: AbortSignal.timeout(5_000) });
+			const pid = Number(String(output).trim());
+			assert.ok(Number.isSafeInteger(pid) && pid > 0);
+			const deadline = Date.now() + 5_000;
+			let stat = "";
+			while (Date.now() < deadline) {
+				stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+				if (stat[stat.lastIndexOf(") ") + 2] === "Z") break;
+				await new Promise((resolve) => setTimeout(resolve, 10));
+			}
+			assert.match(stat, /\(pi\) zombie\) Z /);
+			assert.equal(process.kill(pid, 0), true);
+			const scope = fs.readlinkSync("/proc/self/ns/pid", "utf-8").trim();
+			for (const scenario of [
+				{ name: "matching", recorded: scope, exited: true },
+				{ name: "missing-recorded", recorded: undefined, exited: false },
+				{ name: "different", recorded: "pid:[other]", exited: false },
+			]) {
+				const runId = `zombie-${scenario.name}`;
+				const asyncDir = childDir(runId);
+				writeStatus(asyncDir, { pid, ...(scenario.recorded !== undefined ? { pidNamespaceScope: scenario.recorded } : {}) });
+				const statusPath = path.join(asyncDir, "status.json");
+				const before = fs.readFileSync(statusPath);
+				const publication = scenario.exited ? undefined : setTimeout(() => writeResult(asyncDir, "late output"), 50);
+				try {
+					const outcome = await awaitExistingAsyncRun(asyncDir, runId, AbortSignal.timeout(1500))
+						.catch((error) => ({ status: "aborted" as const, reason: String(error) }));
+					assert.equal(outcome.status, scenario.exited ? "unavailable" : "settled", scenario.name);
+					if (outcome.status === "unavailable") assert.match(outcome.reason, /exited without publishing a result/);
+					if (outcome.status === "settled") assert.equal(outcome.result.output, "late output");
+					assert.deepEqual(fs.readFileSync(statusPath), before, "the exit probe must remain read-only");
+				} finally {
+					clearTimeout(publication);
+				}
+			}
+		} finally {
+			parent.stdin.end("reap");
+			await closed;
+		}
+	});
+
 	it("rejects with the abort reason while waiting", async () => {
 		const asyncDir = childDir();
 		writeStatus(asyncDir, { pid: process.pid });
@@ -144,5 +199,64 @@ describe("awaitExistingAsyncRun", () => {
 		controller.abort(new Error("already stopped"));
 
 		await assert.rejects(awaitExistingAsyncRun(childDir(), "child-run", controller.signal), /already stopped/);
+	});
+});
+
+describe("claimWorkflowAwaitedResult", () => {
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-claim-awaited-result-"));
+	});
+
+	afterEach(() => {
+		fs.rmSync(tempDir, { recursive: true, force: true });
+	});
+
+	// The runner's paused result has no tool-call id and its final result adds one; state and timestamp can match.
+	const paused = { id: "child-run", runId: "child-run", sessionId: "session-a", state: "paused", timestamp: 1_000, results: [{ agent: "worker", output: "", success: false }] };
+	const final = { id: "child-run", toolCallId: "tool-call-a", sessionId: "session-a", state: "paused", timestamp: 1_000, results: [{ agent: "worker", output: "paused after interrupt", success: false }] };
+
+	async function importPaused(asyncDir: string) {
+		writeStatus(asyncDir, { state: "paused", steps: [{ agent: "worker", status: "paused" }] });
+		writePendingAsyncResultFile(path.join(asyncDir, "workflow-result.json"), paused);
+		const outcome = await awaitExistingAsyncRun(asyncDir, "child-run", new AbortController().signal);
+		assert.equal(outcome.status, "settled");
+		return { runId: "child-run", ...(outcome.status === "settled" ? outcome.result.importedPublication : {}) };
+	}
+
+	function assertFinalPublished(asyncDir: string): void {
+		const resultPath = path.join(asyncDir, "workflow-result.json");
+		assert.equal(JSON.parse(fs.readFileSync(resultPath, "utf-8")).toolCallId, "tool-call-a");
+		assert.equal(resultPayloadPathForSessionRun(asyncDir, "session-a", "child-run"), resultPath);
+		assert.equal(resultPayloadPathForIndexedRun(asyncDir, "child-run"), resultPath);
+		assert.deepEqual(resultFilesForToolCall(asyncDir, "tool-call-a"), ["workflow-result.json"]);
+	}
+
+	it("does not claim a final result that replaced the paused result the claimant imported", async () => {
+		const asyncDir = childDir();
+		const read = await importPaused(asyncDir);
+		writeAsyncResultFile(path.join(asyncDir, "workflow-result.json"), final);
+
+		assert.equal(claimWorkflowAwaitedResult(asyncDir, "workflow-b", read), undefined);
+		assertFinalPublished(asyncDir);
+	});
+
+	it("keeps a final result published after the claim when the claimed paused result is removed", async () => {
+		const asyncDir = childDir();
+		const resultPath = path.join(asyncDir, "workflow-result.json");
+		const read = await importPaused(asyncDir);
+		const claimedPath = claimWorkflowAwaitedResult(asyncDir, "workflow-b", read);
+		assert.equal(claimedPath, `${resultPath}.workflow-b.claimed`);
+		writeAsyncResultFile(resultPath, final);
+
+		assert.equal(retireResultSnapshot(resultPath, read, claimedPath), "replaced");
+		assert.equal(fs.existsSync(claimedPath!), false);
+		assertFinalPublished(asyncDir);
+	});
+
+	it("does not claim while another process holds the run's lease", async () => {
+		const asyncDir = childDir();
+		const read = await importPaused(asyncDir);
+		withResultRunLease(asyncDir, "child-run", () => assert.equal(claimWorkflowAwaitedResult(asyncDir, "workflow-b", read), undefined));
+		assert.equal(fs.readFileSync(path.join(asyncDir, "workflow-result.json"), "utf-8"), read.snapshot);
 	});
 });

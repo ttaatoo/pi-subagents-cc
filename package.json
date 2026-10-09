@@ -1,6 +1,6 @@
 {
   "name": "pi-subagents-cc",
-  "version": "0.73.1",
+  "version": "0.74.0",
   "private": true,
   "description": "Pi delegation and scripted workflows with Claude Code-style interaction",
   "author": "Nico Bailon",
@@ -36,6 +36,7 @@
     "pi-package",
     "pi",
     "pi-coding-agent",
+    "extension",
     "subagents",
     "ai",
     "agents",
@@ -98,6 +99,7 @@
     }
   },
   "dependencies": {
+    "@js-temporal/polyfill": "0.5.1",
     "acorn": "8.18.0",
     "jiti": "2.7.0",
     "undici": "8.10.2",

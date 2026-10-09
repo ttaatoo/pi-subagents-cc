@@ -1631,13 +1631,13 @@ syncBuiltinESMExports();
 			path.join(outputDir, "dynamic-1", "0-reviewer", "context.md"),
 			path.join(outputDir, "dynamic-1", "1-reviewer", "context.md"),
 		];
-		assert.equal(fs.readFileSync(dynamicOutputPaths[0]!, "utf-8"), "review-a");
-		assert.equal(fs.readFileSync(dynamicOutputPaths[1]!, "utf-8"), "review-b");
+		assert.equal(fs.readFileSync(dynamicOutputPaths[0]!, "utf-8"), JSON.stringify({ ok: "a" }, null, 2));
+		assert.equal(fs.readFileSync(dynamicOutputPaths[1]!, "utf-8"), JSON.stringify({ ok: "b" }, null, 2));
 		const reviewerArtifacts = payload.results.slice(1, 3).map((result) => result.artifactPaths?.outputPath);
 		assert.ok(reviewerArtifacts[0] && reviewerArtifacts[1]);
 		assert.notEqual(reviewerArtifacts[0], reviewerArtifacts[1]);
-		assert.equal(fs.readFileSync(reviewerArtifacts[0], "utf-8"), "review-a");
-		assert.equal(fs.readFileSync(reviewerArtifacts[1], "utf-8"), "review-b");
+		assert.equal(fs.readFileSync(reviewerArtifacts[0], "utf-8"), JSON.stringify({ ok: "a" }, null, 2));
+		assert.equal(fs.readFileSync(reviewerArtifacts[1], "utf-8"), JSON.stringify({ ok: "b" }, null, 2));
 		assert.match(readMockPiArgs(mockPi, 1).at(-1) ?? "", new RegExp(dynamicOutputPaths[0]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.match(readMockPiArgs(mockPi, 2).at(-1) ?? "", new RegExp(dynamicOutputPaths[1]!.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
 		assert.equal(status.steps?.length, 4);
@@ -1707,6 +1707,43 @@ syncBuiltinESMExports();
 		assert.match(error, /materialized 2 items that resolve output to the same path/);
 		assert.match(error, /shared\.md/);
 		assert.equal(mockPi.callCount(), 1);
+	});
+
+	it("async dynamic fanout runs external-runner template children through the external runner", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {
+		mockPi.onCall({ matchArgIncludes: "Produce targets", output: "targets", structuredOutput: { items: [{ path: "src/a.ts" }, { path: "src/b.ts" }] } });
+		const reviewer = makeAgent("reviewer", {
+			runner: { type: "external-cli", command: process.execPath, args: ["-e", "let s='';process.stdin.on('data',c=>s+=c);process.stdin.on('end',()=>{const m=s.match(/Review (src\\/\\S+)/);process.stdout.write('external-review:'+(m?m[1]:'none'))})"] },
+		} as never);
+		const id = `async-dynamic-external-runner-${Date.now().toString(36)}`;
+		const launch = executeAsyncChain(id, {
+			chain: [
+				{ agent: "producer", task: "Produce targets", as: "targets", outputSchema: { type: "object" } },
+				{
+					expand: { from: { output: "targets", path: "/items" }, item: "target", key: "/path", maxItems: 2 },
+					parallel: { agent: "reviewer", task: "Review {target.path}" },
+					collect: { as: "reviews" },
+					concurrency: 2,
+				},
+			],
+			agents: [makeAgent("producer"), reviewer],
+			ctx: { pi: { events: { emit() {} } }, cwd: tempDir, currentSessionId: "session-dynamic-external-runner" },
+			artifactConfig: { enabled: false, includeInput: false, includeOutput: false, includeJsonl: false, includeMetadata: false, cleanupDays: 7 },
+			shareEnabled: false,
+			maxSubagentDepth: 2,
+			acceptance: false,
+		});
+
+		assert.equal(launch.isError, undefined, launch.content[0]?.text ?? "launch failed");
+		const payload = await readAsyncPayload(id);
+		const status = JSON.parse(fs.readFileSync(path.join(ASYNC_DIR, id, "status.json"), "utf-8")) as AsyncStatusPayload;
+		assert.equal(payload.success, true, payload.results.find((result) => result.error)?.error);
+		assert.equal(mockPi.callCount(), 1);
+		assert.deepEqual(status.steps?.map((step) => step.agent), ["producer", "reviewer", "reviewer"]);
+		assert.deepEqual(status.steps?.slice(1).map((step) => step.runner?.type), ["external-cli", "external-cli"]);
+		const collected = payload.outputs?.reviews?.structured as Array<{ key: string; text: string; exitCode: number | null }>;
+		assert.deepEqual(collected.map((item) => item.key), ["src/a.ts", "src/b.ts"]);
+		assert.deepEqual(collected.map((item) => item.text), ["external-review:src/a.ts", "external-review:src/b.ts"]);
+		assert.deepEqual(collected.map((item) => item.exitCode), [0, 0]);
 	});
 
 	it("async dynamic fanout applies fork session files and thinking overrides to materialized children", { skip: !isAsyncAvailable() ? "jiti not available" : undefined }, async () => {

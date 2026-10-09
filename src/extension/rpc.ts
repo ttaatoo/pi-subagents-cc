@@ -3,7 +3,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Compile } from "typebox/compile";
 import { resolveAsyncRunLocation } from "../runs/background/async-resume.ts";
-import { deliverStopRequest } from "../runs/background/control-channel.ts";
+import { deliverAsyncRunStop } from "../runs/foreground/async-stop-action.ts";
 import { reconcileAsyncRun } from "../runs/background/stale-run-reconciler.ts";
 import type { SubagentParamsLike } from "../runs/foreground/subagent-executor.ts";
 import { resolveCurrentSessionId } from "../shared/session-identity.ts";
@@ -513,8 +513,17 @@ function manageParams(params: unknown): SubagentParamsLike {
 	return output;
 }
 
-function spawnParams(params: unknown): SubagentParamsLike {
-	const input = assertRecordParams(params, "spawn");
+function spawnParams(params: unknown, options: RegisterSubagentRpcBridgeOptions): SubagentParamsLike {
+	const { script, ...input } = assertRecordParams(params, "spawn");
+	if (Object.hasOwn(input, "workflowScript")) throw new SubagentRpcError("invalid_params", "RPC spawn workflowScript was removed; pass inline script text as script.");
+	if (Object.hasOwn(input, "workflowScriptPath")) throw new SubagentRpcError("invalid_params", "RPC spawn workflowScriptPath was removed; pass the file as workflow: \"./path/to/script.js\".");
+	if (input.workflow === true || input.workflow === "true") throw new SubagentRpcError("invalid_params", "RPC spawn has no reply block for workflow: true; pass inline script text as script or a file as workflow: \"./path/to/script.js\".");
+	if (script !== undefined) {
+		if (typeof script !== "string" || !script.trim()) throw new SubagentRpcError("invalid_params", "RPC spawn script must be a non-empty string.");
+		if (input.workflow !== undefined) throw new SubagentRpcError("invalid_params", "RPC spawn script cannot be combined with workflow.");
+		// The executor's internal carrier; the model-facing tool cannot set it.
+		input.workflowScript = script;
+	}
 	const normalized = normalizePublicSubagentExecution(input);
 	if (!normalized.ok) throw new SubagentRpcError("invalid_params", normalized.error);
 	if (normalized.params.action !== undefined) {
@@ -666,8 +675,9 @@ function stopAsyncRun(
 	if (status.sessionId !== currentSessionId) {
 		throw new SubagentRpcError("not_found", `Async run '${runId}' was not found in the active session.`);
 	}
-	if (status.state !== "running") {
-		throw new SubagentRpcError("invalid_state", `Async run ${runId} is ${status.state}; stop only supports running async runs.`);
+	const pausedWholeRun = status.state === "paused" && childId === undefined;
+	if (status.state !== "running" && status.state !== "queued" && !pausedWholeRun) {
+		throw new SubagentRpcError("invalid_state", `Async run ${runId} is ${status.state}; stop only supports running or queued async runs, or a paused whole run.`);
 	}
 	if (childId !== undefined) {
 		const resolution = resolveAsyncStatusChild(status, childId);
@@ -679,19 +689,23 @@ function stopAsyncRun(
 	}
 
 	try {
-		deliverStopRequest({
+		const failure = deliverAsyncRunStop({
 			asyncDir: location.asyncDir,
+			status,
+			resultsDir,
 			pid: status.pid,
 			kill: options.kill,
 			now: options.now,
 			source: "rpc-stop",
 			...(child ? { targetIndex: child.index, childId: child.id } : {}),
 		});
+		if (failure) throw new Error(`Stop request persisted for paused async run ${runId}, but terminal proof is not ready (${failure}). Retry stop after runner shutdown is observed.`);
 	} catch (error) {
 		throw new SubagentRpcError("execution_failed", error instanceof Error ? error.message : String(error));
 	}
 	if (child) emitChildStopping(runId, location.asyncDir, child);
 
+	// This is an acceptance receipt, not terminal proof, even when a proven paused run was sealed.
 	return {
 		runId,
 		asyncDir: location.asyncDir,
@@ -715,7 +729,7 @@ async function handleRequest(
 		return executeChecked(options, ctx, request.requestId, request.method, manageParams(request.params));
 	}
 	if (request.method === "spawn") {
-		return executeChecked(options, ctx, request.requestId, request.method, spawnParams(request.params));
+		return executeChecked(options, ctx, request.requestId, request.method, spawnParams(request.params, options));
 	}
 	if (request.method === "status") {
 		const statusParams = normalizeStatusParams(request.params);

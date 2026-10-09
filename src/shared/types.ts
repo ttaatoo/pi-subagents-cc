@@ -454,6 +454,8 @@ export interface ParallelHandoffLaneBinding {
 }
 
 export interface ParallelHandoffCleanupTask {
+	/** Canonical parent recorded when the worktree was created; missing proof keeps old trees. */
+	recordedBaseDir?: string;
 	index: number;
 	path: string;
 	branch: string;
@@ -835,6 +837,8 @@ export interface SteeringRecoveryDescriptor {
 	sessionFile?: string;
 	/** Git ref used to allocate managed worktrees for this run. */
 	baseRef?: string;
+	/** Launcher name the run was wrapped with; resume re-reads its argv from current user config. Absence means unwrapped. */
+	launcher?: string;
 	cwd: string;
 	model?: string;
 	modelProvider?: string;
@@ -911,6 +915,8 @@ export interface SubagentResultIntercomChild {
 	status: SubagentResultStatus;
 	/** Whether the child produced substantive output before its process ended. */
 	outputState?: SubagentOutputState;
+	/** True when the output is unfinished streamed text recovered after a timeout or child error. */
+	outputPartial?: boolean;
 	summary: string;
 	index?: number;
 	artifactPath?: string;
@@ -1274,6 +1280,8 @@ export interface SingleResult {
 	index: number;
 	/** Workflow child key that owns this result when returned from workflow details. */
 	workflowKey?: string;
+	/** Workflow child run id that produced this result; resumed rounds share a session file but not a run id. */
+	runId?: string;
 	agent: string;
 	task: string;
 	/** Human-readable display name for the child's own session (agent + task
@@ -1321,6 +1329,8 @@ export interface SingleResult {
 	finalOutput?: string;
 	/** Provenance-aware state for substantive child output, excluding synthetic lifecycle messages. */
 	outputState?: SubagentOutputState;
+	/** True when the output is unfinished streamed text recovered after a timeout or child error. */
+	outputPartial?: boolean;
 	outputMode?: OutputMode;
 	savedOutputPath?: string;
 	outputReference?: SavedOutputReference;
@@ -1378,6 +1388,8 @@ export interface WaitCompletionChild {
 	sessionFile?: string;
 	success?: boolean;
 	outputState?: SubagentOutputState;
+	/** True when the output is unfinished streamed text recovered after a timeout or child error. */
+	outputPartial?: boolean;
 	structuredOutput?: unknown;
 	structuredOutputPath?: string;
 	error?: string;
@@ -1427,6 +1439,7 @@ export interface AgentCapabilityRow {
 }
 
 export interface Details {
+	commands?: import("../runs/shared/child-commands.ts").ChildCommandSnapshot[];
 	mode: SubagentResultMode | "management";
 	workflowReceiptPath?: string;
 	runId?: string;
@@ -1450,8 +1463,8 @@ export interface Details {
 		activeRunIds: string[];
 		activeProviderItems: Array<{ provider: string; id: string }>;
 	} | {
-		/** Non-terminal internal auto-drain yield; tracked work remains active. */
-		reason: "supervisor_request";
+		/** Non-terminal yield for a supervisor request or a user message; tracked work remains active. */
+		reason: "supervisor_request" | "user_input";
 		timedOut: false;
 		activeRunIds: string[];
 		activeProviderItems: Array<{ provider: string; id: string }>;
@@ -1918,6 +1931,8 @@ export interface AsyncStatus {
 	/** Linux PID namespace identity used to scope liveness probes. */
 	pidNamespaceScope?: string;
 	cwd?: string;
+	/** User-configured launcher that wrapped the background runner (argv only, never environment). */
+	launcher?: RunnerLauncher;
 	/** Parent-resolved child session root retained for trusted restored transcript lookup. */
 	sessionRoot?: string;
 	currentStep?: number;
@@ -2141,6 +2156,8 @@ export interface ForegroundResumeChild {
 	error?: string;
 	finalOutput?: string;
 	outputState?: SubagentOutputState;
+	/** True when the output is unfinished streamed text recovered after a timeout or child error. */
+	outputPartial?: boolean;
 	outputMode?: OutputMode;
 	savedOutputPath?: string;
 	outputSaveError?: string;
@@ -2405,6 +2422,13 @@ export const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
 /** pi-intercom asks each session for a fixed intercom ID at session start; `claim(id)` answers synchronously. */
 export const INTERCOM_SESSION_IDENTITY_EVENT = "intercom:session-identity";
 export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
+/** Launcher names are plain identifiers so they survive frontmatter rewrites without quoting. */
+export const RUNNER_LAUNCHER_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+export const RUNNER_LAUNCHER_NAME_RULE = "must start with a letter or digit and use only letters, digits, '.', '_' or '-' (at most 128 characters)";
+export interface RunnerLauncher {
+	name: string;
+	argv: string[];
+}
 export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 export const SUBAGENT_PROCESS_TERMINAL_EVENT = "subagent:process-terminal";
 export const SUBAGENT_FOREGROUND_COMPLETE_EVENT = "subagent:foreground-complete";
@@ -2591,6 +2615,7 @@ export interface ProactiveSkillSubagentsConfig {
 }
 
 export type ToolDescriptionMode = "full" | "compact" | "custom";
+export type ToolActivationMode = "auto" | "dynamic" | "eager";
 export type InlineToolDisplay = "rich" | "summary";
 
 export interface ScheduledRunsConfig {
@@ -2601,6 +2626,7 @@ export interface ScheduledRunsConfig {
 }
 
 export type FleetViewPlacement = "aboveEditor" | "belowEditor";
+export type AsyncWidgetLayout = "adaptive" | "rows";
 
 export const FLEET_KEYBINDING_ACTIONS = [
 	"close",
@@ -2662,10 +2688,20 @@ export interface ExtensionConfig {
 	fleetKeybindings?: FleetKeybindingsConfig;
 	/** Show the under-editor async runs widget. Defaults to true, including when FleetView is enabled. */
 	asyncWidget?: boolean;
+	/** Start the under-editor async runs widget folded. Defaults to false. */
+	asyncWidgetCollapsed?: boolean;
+	/** Unfolded async runs widget layout: "adaptive" fits run details to the terminal height, "rows" shows one line per run. Defaults to "adaptive". */
+	asyncWidgetLayout?: AsyncWidgetLayout;
+	/** Report subagent run state to the terminal with OSC 7501. Defaults to true. */
+	programStatus?: boolean;
 	/** Exact provider/model candidates mapped to operator-declared equivalent response IDs. Empty arrays add no accepted IDs. */
 	modelResponseAliases?: Record<string, string[]>;
+	/** Named argv prefixes for background runners; agents select one with `launcher: <name>`. User config only. */
+	runnerLaunchers?: Record<string, string[]>;
 	/** Tool description variant registered for the parent-facing subagent tool. Defaults to split metadata. */
 	toolDescriptionMode?: ToolDescriptionMode;
+	/** How a new parent session offers the subagent tool. Defaults to auto. */
+	toolActivation?: ToolActivationMode;
 	/** Inline chat rendering for the subagent tool. Defaults to rich. */
 	inlineToolDisplay?: InlineToolDisplay;
 	/** Density controls for the main chat subagent call/result renderer. */
@@ -2851,7 +2887,7 @@ export const POLL_INTERVAL_MS = 250;
 export const WIDGET_ANIMATION_INTERVAL_MS = 1000;
 export const MAX_WIDGET_JOBS = 4;
 export const DEFAULT_SUBAGENT_MAX_DEPTH = 2;
-export const SUBAGENT_ACTIONS = ["list", "get", "models", "children.list", "guide", "validate", "create", "update", "delete", "eject", "disable", "enable", "reset", "mission.create", "mission.list", "mission.show", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "worktree.discard", "worktree.cleanup", "lane.status", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.show", "refine.rollback", "inspector.open", "inspector.command", "inspector.status", "inspector.close", "project.open", "project.status", "project.close", "status", "debug.run", "grant-spawn-budget", "interrupt", "resume", "steer", "stop", "dismiss", "doctor", "watchdog.status", "watchdog.check", "watchdog.configure", "watchdog.recommend-model", "schedule.create", "schedule.list", "schedule.show", "schedule.history", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"] as const;
+export const SUBAGENT_ACTIONS = ["list", "get", "models", "children.list", "guide", "validate", "create", "update", "delete", "eject", "disable", "enable", "reset", "mission.create", "mission.list", "mission.show", "mission.update", "mission.resolve-decision", "mission.attach-run", "mission.close", "worktree.discard", "worktree.cleanup", "lane.status", "lane.recordMerge", "lane.recordSupersession", "refine", "refine.show", "refine.rollback", "inspector.open", "inspector.command", "inspector.status", "inspector.close", "project.open", "project.status", "project.close", "status", "debug.run", "grant-spawn-budget", "interrupt", "resume", "steer", "stop", "command.status", "command.yield", "command.cancel", "dismiss", "doctor", "watchdog.status", "watchdog.check", "watchdog.configure", "watchdog.recommend-model", "schedule.create", "schedule.list", "schedule.show", "schedule.history", "schedule.pause", "schedule.resume", "schedule.run", "schedule.run-due", "schedule.delete"] as const;
 
 export const DEFAULT_FORK_PREAMBLE =
 	"You are a delegated subagent running from a fork of the parent session. " +

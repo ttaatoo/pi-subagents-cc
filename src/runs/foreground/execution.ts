@@ -52,6 +52,7 @@ import {
 	boundStreamedToolCalls,
 } from "../../shared/utils.ts";
 import { resolveSkillsWithFallback } from "../../agents/skills.ts";
+import { createPartialOutputTracker, formatPartialOutput, type PartialOutputCause } from "../shared/partial-output.ts";
 import { effectiveToolTimeoutMs, formatToolTimeoutMessage, resolveToolTimeoutMs, toolTimeoutCallKey, toolTimeoutFromEnv } from "../shared/tool-timeout.ts";
 import { preflightLaunchCwd } from "../shared/launch-cwd.ts";
 import { createJsonlWriter } from "../../shared/jsonl-writer.ts";
@@ -60,12 +61,12 @@ import { resolvePermissionRules } from "../shared/permissions.ts";
 import { applyThinkingSuffix, deriveForkPromptCacheKey } from "../shared/child-tool-plan.ts";
 import { deriveChildSessionName } from "../../shared/child-session-name.ts";
 import { assertAgentAllowedByCapabilityCeiling, intersectSubagentCapabilityCeilings, resolveCurrentSubagentCapabilityCeiling } from "../shared/capability-ceiling.ts";
-import { resolveEffectiveThinking } from "../../shared/model-info.ts";
+import { qualifyModelWithProvider, resolveEffectiveThinking } from "../../shared/model-info.ts";
 import { assertThinkingWithinCeiling, intersectThinkingCeilings } from "../../shared/thinking-ceiling.ts";
 import { formatStructuredOutputRejectionError, MISSING_STRUCTURED_ACCEPTANCE_REPORT_ERROR, MISSING_STRUCTURED_OUTPUT_CALL_ERROR } from "../shared/structured-output.ts";
 import { formatMidToolExitError, isOrdinaryToolForMidToolExit } from "../shared/process-signal.ts";
 import { formatChildToolDiagnostic } from "../shared/tool-availability.ts";
-import { formatChildModelResolutionDiagnostic, isChildModelResolutionFailure } from "../shared/model-resolution-diagnostic.ts";
+import { formatChildModelResolutionDiagnostic, formatInheritedProviderDiagnostic, isChildModelResolutionFailure } from "../shared/model-resolution-diagnostic.ts";
 import { planAbortRecovery } from "../shared/abort-recovery.ts";
 import { buildTimeoutRecoverySummary, collectTrackedMutationEvidence, snapshotTrackedMutations } from "../shared/mutation-evidence.ts";
 import { captureSingleOutputSnapshot, extractChildWrittenOutput, finalizeSingleOutput, formatSavedOutputReference, hasSingleOutputChangedSinceSnapshot, resolveSingleOutput, validateFileOnlyOutputMode, type SingleOutputSnapshot } from "../shared/single-output.ts";
@@ -174,17 +175,13 @@ function persistSingleResultMetadata(input: {
 	});
 }
 
-function formatTimeoutMessage(timeoutMs: number): string {
-	return `Subagent timed out after ${timeoutMs}ms.`;
-}
-
 function resolveAttemptTimeout(options: RunSyncOptions): { timeoutMs: number; remainingMs: number; message: string } | undefined {
 	if (options.timeoutMs === undefined) return undefined;
 	const deadlineAt = options.deadlineAt ?? Date.now() + options.timeoutMs;
 	return {
 		timeoutMs: options.timeoutMs,
 		remainingMs: Math.max(0, deadlineAt - Date.now()),
-		message: formatTimeoutMessage(options.timeoutMs),
+		message: `Subagent timed out after ${options.timeoutMs}ms.`,
 	};
 }
 
@@ -269,8 +266,7 @@ function snapshotResult(result: SingleResult, progress: AgentProgress): SingleRe
  * foreground detach receipts and terminal consumers use snapshotResult directly.
  */
 function snapshotStreamResult(result: SingleResult, progress: AgentProgress): SingleResult {
-	const snapshot = snapshotResult(result, progress);
-	snapshot.messages = undefined;
+	const snapshot = snapshotResult({ ...result, messages: undefined }, progress);
 	snapshot.toolCalls = boundStreamedToolCalls(result);
 	return snapshot;
 }
@@ -526,6 +522,7 @@ async function runSingleAttempt(
 		else delete progress.cacheWrite;
 	};
 	const attemptTimeout = resolveAttemptTimeout(options);
+	let timeoutCause: string | undefined;
 	if (attemptTimeout?.remainingMs === 0) {
 		result.exitCode = 1;
 		result.timedOut = true;
@@ -566,6 +563,8 @@ async function runSingleAttempt(
 		}
 	}
 	const childSessions = options.childSessionFactory ?? childSessionFactory();
+	const partialOutput = createPartialOutputTracker();
+	let childPromptFailed = false;
 	const exitCode = await new Promise<number>((resolve) => {
 		const jsonlWriter = createJsonlWriter(shared.jsonlPath, { pause() {}, resume() {} });
 		let session: ChildSession | undefined;
@@ -772,7 +771,13 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			// Report the run only after the child's extensions have shut down.
-			void Promise.resolve().then(() => session?.dispose()).catch(() => undefined).then(() => {
+			void Promise.resolve().then(async () => {
+				if (code === 0 && !result.interrupted && !result.timedOut && !result.stopped && !abortedBySignal) {
+					try { await session?.finishCommands?.(); }
+					catch (error) { result.error = error instanceof Error ? error.message : String(error); code = 1; }
+				}
+				await session?.dispose();
+			}).catch(() => undefined).then(() => {
 				resolve(code);
 			});
 		};
@@ -786,7 +791,7 @@ async function runSingleAttempt(
 
 		let activeLongRunningNotified = false;
 		let pendingToolResult: { tool: string; path?: string; mutates: boolean; startedAt?: number } | undefined;
-		type ActiveToolCall = { key: string; tool: string; args: string; startedAt: number; path?: string };
+		type ActiveToolCall = { attentionEmitted?: boolean; key: string; tool: string; args: string; startedAt: number; path?: string };
 		let activeToolSequence = 0;
 		const activeToolCalls = new Map<string, ActiveToolCall>();
 		const activeToolKeysByName = new Map<string, string[]>();
@@ -842,12 +847,12 @@ async function runSingleAttempt(
 			return key ? removeActiveToolCallKey(key) : undefined;
 		};
 		const openToolAttentionTarget = (now: number): ActiveToolCall | undefined => [...activeToolCalls.values()]
-			.filter((active) => shouldEmitOpenToolAttention({ config: controlConfig, currentTool: active.tool, currentToolStartedAt: active.startedAt, now }))
+			.filter((active) => !active.attentionEmitted && shouldEmitOpenToolAttention({ config: controlConfig, currentTool: active.tool, currentToolStartedAt: active.startedAt, now }))
 			.sort((left, right) => left.startedAt - right.startedAt)[0];
 		const mutatingFailures = createMutatingFailureState();
 		const mutatingFailureWindowMs = 5 * 60_000;
 		const currentToolDurationMs = (now: number) => progress.currentToolStartedAt ? Math.max(0, now - progress.currentToolStartedAt) : undefined;
-		const emitNeedsAttention = (now: number, input: { message?: string; reason?: ControlEvent["reason"]; recentFailureSummary?: string; currentTool?: string; currentPath?: string; currentToolDurationMs?: number } = {}): boolean => {
+		const emitNeedsAttention = (now: number, input: { message?: string; reason?: ControlEvent["reason"]; recentFailureSummary?: string; currentTool?: string; toolCallId?: string; currentPath?: string; currentToolDurationMs?: number } = {}): boolean => {
 			if (!controlConfig.enabled) return false;
 			const previous = progress.activityState;
 			progress.activityState = "needs_attention";
@@ -866,13 +871,14 @@ async function runSingleAttempt(
 				tokens: progress.tokens,
 				toolCount: progress.toolCount,
 				currentTool: input.currentTool ?? progress.currentTool,
+				toolCallId: input.toolCallId,
 				currentToolDurationMs: input.currentToolDurationMs ?? currentToolDurationMs(now),
 				currentPath: input.currentPath ?? progress.currentPath,
 				recentFailureSummary: input.recentFailureSummary,
 				taskPreview: task,
 			});
 			emitControlEvent(event);
-			return previous !== "needs_attention";
+			return previous !== "needs_attention" || input.reason === "tool_open_threshold";
 		};
 		const emitActiveLongRunning = (now: number, reason: ControlEvent["reason"]): boolean => {
 			if (!controlConfig.enabled || activeLongRunningNotified || progress.activityState === "needs_attention") return false;
@@ -914,13 +920,15 @@ async function runSingleAttempt(
 			if (idleState === "needs_attention") {
 				return progress.activityState === "needs_attention" ? false : emitNeedsAttention(now);
 			}
-			const toolAttentionTarget = progress.activityState !== "needs_attention" ? openToolAttentionTarget(now) : undefined;
+			const toolAttentionTarget = openToolAttentionTarget(now);
 			if (toolAttentionTarget) {
+				toolAttentionTarget.attentionEmitted = true;
 				const durationMs = Math.max(0, now - toolAttentionTarget.startedAt);
 				return emitNeedsAttention(now, {
 					message: `${agent.name} has had tool '${toolAttentionTarget.tool}' open for ${Math.floor(durationMs / 1000)}s`,
 					reason: "tool_open_threshold",
 					currentTool: toolAttentionTarget.tool,
+					toolCallId: toolAttentionTarget.key.startsWith("id:") ? toolAttentionTarget.key.slice(3) : undefined,
 					currentPath: toolAttentionTarget.path,
 					currentToolDurationMs: durationMs,
 				});
@@ -965,6 +973,7 @@ async function runSingleAttempt(
 
 		const processEvent = (evt: ChildSessionEvent & { message?: Message; toolName?: string; toolCallId?: string; args?: unknown; willRetry?: unknown }) => {
 			if (lifecycleFinished) return;
+			partialOutput.observe(evt);
 			jsonlWriter.writeLine(JSON.stringify(projectChildSessionEventForJson(evt)));
 			shared.transcriptWriter?.writeChildEvent(evt);
 			shared.orcaProgressTab?.event(evt);
@@ -1099,10 +1108,11 @@ async function runSingleAttempt(
 					}
 					projectCompleteUsage();
 					if (evt.message.model) {
-						progress.model = evt.message.model;
-						if (!result.model) result.model = evt.message.model;
+						const observedModel = qualifyModelWithProvider(evt.message.model, evt.message.provider, options.availableModels) ?? evt.message.model;
+						progress.model = observedModel;
+						if (!result.model) result.model = observedModel;
 						if (expectedModelForVerification && !hasToolCall) {
-							const modelVerificationError = formatSubagentModelVerificationError(expectedModelForVerification, evt.message.model, options.availableModels, options.modelResponseAliases);
+							const modelVerificationError = formatSubagentModelVerificationError(expectedModelForVerification, evt.message.model, options.availableModels, options.modelResponseAliases, session?.virtualModelId);
 							if (modelVerificationError && !result.error) result.error = modelVerificationError;
 						}
 					}
@@ -1200,8 +1210,9 @@ async function runSingleAttempt(
 
 		if (attemptTimeout) {
 			timeoutTimer = setTimeout(() => {
-				if (sessionSettled || lifecycleFinished || interruptedByControl) return;
+				if (sessionSettled || lifecycleFinished || interruptedByControl || result.timedOut) return;
 				result.timedOut = true;
+				timeoutCause = attemptTimeout.message;
 				clearAllToolTimeouts();
 				result.error = attemptTimeout.message;
 				result.finalOutput = attemptTimeout.message;
@@ -1250,8 +1261,10 @@ async function runSingleAttempt(
 			}
 		};
 		const terminateForToolTimeout = (message: string): void => {
-			if (sessionSettled || lifecycleFinished || interruptedByControl) return;
+			if (sessionSettled || lifecycleFinished || interruptedByControl || result.timedOut) return;
+			clearTimeout(timeoutTimer);
 			result.timedOut = true;
+			timeoutCause = message;
 			result.error = message;
 			result.finalOutput = message;
 			progress.status = "failed";
@@ -1296,13 +1309,15 @@ async function runSingleAttempt(
 			if (session?.machineEvidence) result.nativeMachine = { provider: "herdr", machineId: session.machineEvidence.machineId, ...(session.machineEvidence.initial ? { initialGit: session.machineEvidence.initial } : {}), ...(session.machineEvidence.final ? { finalGit: session.machineEvidence.final } : {}) };
 			let closeError = result.error ?? toolDiagnosticError ?? assistantError;
 			const promptErrorMessage = promptError === undefined ? undefined : promptError instanceof Error ? promptError.message : String(promptError);
+			if (promptError !== undefined) childPromptFailed = true;
 			if (!closeError && promptErrorMessage !== undefined) {
 				closeError = promptErrorMessage;
 			}
-			// A foreground child never loads the parent's ambient extensions, so a
-			// provider one registers resolves as "not found" before the child starts.
-			// Annotate only a creation/prompt failure that produced no turn; keep the
-			// core error and add the host rule and both remedies after it.
+			// A foreground child never loads the parent's ambient extensions. A model
+			// whose provider the parent registry does not serve resolves as "not found"
+			// before the child starts; a provider it does serve is inherited without its
+			// extension's session hooks and can fail the first request. Keep the
+			// original error first and add the host rule and remedies after it.
 			if (promptErrorMessage !== undefined
 				&& closeError === promptErrorMessage
 				&& isChildModelResolutionFailure(promptErrorMessage)
@@ -1310,6 +1325,12 @@ async function runSingleAttempt(
 				&& result.usage.turns === 0
 				&& !launch.session.ambientExtensions) {
 				closeError = `${promptErrorMessage}\n\n${formatChildModelResolutionDiagnostic({ agent: agent.name, model: launch.session.model, host: "parent", capabilityCeiling: launch.toolPlan.capabilityCeiling })}`;
+			} else if (session?.inheritedProvider
+				&& closeError !== undefined
+				&& (closeError === promptErrorMessage || closeError === assistantError)
+				&& progress.toolCount === 0
+				&& (result.messages ?? []).every((message) => message.role !== "assistant" || (message as { stopReason?: string }).stopReason === "error")) {
+				closeError = `${closeError}\n\n${formatInheritedProviderDiagnostic({ agent: agent.name, model: launch.session.model, provider: session.inheritedProvider, capabilityCeiling: launch.toolPlan.capabilityCeiling })}`;
 			}
 			const forcedDrainAfterFinalSuccess = (forced || forcedTermination) && (cleanTerminalAssistantStopReceived || agentSettledReceived) && !closeError;
 			const forcedDrainAfterEmptyTerminal = forcedDrainAfterFinalSuccess && hasEmptyTerminalAssistantResponse(result.messages ?? []);
@@ -1517,11 +1538,23 @@ async function runSingleAttempt(
 	const mutationEvidence = result.nativeMachine ? { source: "tracked-files" as const, trackedOnly: true as const, changedFiles: [], attemptedMutation: remoteGitChanged === true, ...(remoteGitChanged === undefined ? { unavailable: "Remote Git before/after evidence was incomplete." } : {}) } : collectTrackedMutationEvidence(mutationSnapshot, options.cwd ?? runtimeCwd);
 
 	const acceptanceOutput = getFinalOutput(result.messages ?? []);
+	const structuredText = result.structuredOutput === undefined ? undefined : JSON.stringify(result.structuredOutput, null, 2);
 	let fullOutput = stripAcceptanceReport(acceptanceOutput);
-	if (!fullOutput.trim() && result.structuredOutput !== undefined) fullOutput = JSON.stringify(result.structuredOutput, null, 2);
+	if (!fullOutput.trim() && structuredText !== undefined) fullOutput = structuredText;
+	// Text still streaming when the child timed out or its session threw never reached
+	// a completed message. Keep it, labeled; the run still fails and the text never
+	// stands in for acceptance or a requested output file.
+	const partialCause: PartialOutputCause | undefined = result.timedOut
+		? "timeout"
+		: childPromptFailed && !abortedBySignal && !result.interrupted && !result.stopped ? "child error" : undefined;
+	const streamedPartial = partialCause ? partialOutput.text() : undefined;
+	if (partialCause && streamedPartial) {
+		const text = stripAcceptanceReport(streamedPartial);
+		fullOutput = partialCause === "timeout" ? text : formatPartialOutput(text, partialCause);
+		result.outputPartial = true;
+	}
 	result.outputState = fullOutput.trim() || result.structuredOutput !== undefined ? "present" : "absent";
-	if (result.timedOut) {
-		const timeoutMessage = formatTimeoutMessage(options.timeoutMs ?? 0);
+	if (timeoutCause) {
 		let requiredOutputMissing: boolean | undefined;
 		if (options.outputMode === "file-only" && options.outputPath) {
 			const outputChanged = hasSingleOutputChangedSinceSnapshot(options.outputPath, shared.outputSnapshot);
@@ -1541,11 +1574,12 @@ async function runSingleAttempt(
 			artifactPaths: shared.artifactPaths,
 		});
 		fullOutput = fullOutput.trim()
-			? `${timeoutMessage}\n\n${result.timeoutRecovery.message}\n\nPartial output before timeout:\n${fullOutput}`
-			: `${timeoutMessage}\n\n${result.timeoutRecovery.message}`;
+			? `${timeoutCause}\n\n${result.timeoutRecovery.message}\n\nPartial output before timeout:\n${fullOutput}`
+			: `${timeoutCause}\n\n${result.timeoutRecovery.message}`;
 	}
 		if (options.outputPath && result.exitCode === 0) {
-			const resolvedOutput = resolveSingleOutput(options.outputPath, fullOutput, shared.outputSnapshot, options.outputClaimPath);
+			// The schema is the caller's contract: a bound output file holds the structured result, not closing prose.
+			const resolvedOutput = resolveSingleOutput(options.outputPath, structuredText ?? fullOutput, shared.outputSnapshot, options.outputClaimPath);
 			fullOutput = stripAcceptanceReport(resolvedOutput.fullOutput);
 			result.savedOutputPath = resolvedOutput.savedPath;
 			result.outputSaveError = resolvedOutput.saveError;

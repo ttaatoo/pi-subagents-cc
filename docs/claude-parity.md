@@ -7,7 +7,7 @@
 
 | Claude / tintinweb | 本仓 | 状态 |
 |---|---|---|
-| 空 prompt `↓`/`←` 激活列表 | `src/tui/fleet-status.ts handleKey`：`down/left/right` + 空编辑器激活 | ✅ P0：`right` 为新增（tintinweb 只有 `↓/←`） |
+| 空 prompt `↓`/`←` 激活列表 | `src/tui/fleet-status.ts handleKey`：`down/left` + 空编辑器激活 | ✅ P0：`→` 激活为计划项（fleet-keys 重构时落码），当前代码仅 `↓`/`←`，本行以代码为准 |
 | `↑/↓`（`j/k`）移动，顶部 `↑` 退回 prompt | 同上；`selectedKey/main` + `deactivate()` | ✅ 1:1 |
 | `→`/`Enter` 进入选中（viewer），`main` 回 prompt | 同上 `openSelectedInspector`；`main` 上 `→/Enter` = deactivate | ✅ P0：`→` 进入为新增 |
 | `←`/`Esc` 返回 prompt | `escape/left → deactivate()`，`inspectorOpen` 时不截键 | ✅ P0：`←` 退出为新增 |

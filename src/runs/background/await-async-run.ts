@@ -3,11 +3,11 @@ import { readStatus } from "../../shared/utils.ts";
 import { workflowAwaitedAsyncResultPath } from "./async-execution.ts";
 import { waitForImportedAsyncRoot, type ImportedAsyncRootResult } from "./chain-root-attachment.ts";
 import { currentPidNamespaceScope } from "./pid-namespace.ts";
-import { resultPayloadPathForSessionRun } from "./result-files.ts";
+import { resultPayloadPathForSessionRun, resultSnapshotReplaced, withResultRunLease, type ResultSnapshot } from "./result-files.ts";
 import { checkPidLiveness } from "./stale-run-reconciler.ts";
 
 type ExistingAsyncRunOutcome =
-	| { status: "settled"; result: ImportedAsyncRootResult }
+	| { status: "settled"; result: ImportedAsyncRootResult & { importedPublication: NonNullable<ImportedAsyncRootResult["importedPublication"]> } }
 	| { status: "unavailable"; reason: string };
 
 function errorMessage(error: unknown): string {
@@ -18,8 +18,10 @@ function errorMessage(error: unknown): string {
 function runnerExitedWithoutResult(asyncDir: string, runId: string, resultPath: string): boolean {
 	const status = readStatus(asyncDir);
 	if (!status || (status.state !== "running" && status.state !== "queued") || typeof status.pid !== "number") return false;
-	if (status.pidNamespaceScope !== undefined && status.pidNamespaceScope !== currentPidNamespaceScope()) return false;
-	if (checkPidLiveness(status.pid) !== "dead") return false;
+	const observedScope = currentPidNamespaceScope();
+	if (status.pidNamespaceScope !== undefined && status.pidNamespaceScope !== observedScope) return false;
+	const pidScopeVerified = status.pidNamespaceScope !== undefined && status.pidNamespaceScope === observedScope;
+	if (checkPidLiveness(status.pid, undefined, pidScopeVerified) !== "dead") return false;
 	return !fs.existsSync(resultPath) && !(status.sessionId && resultPayloadPathForSessionRun(asyncDir, status.sessionId, runId));
 }
 
@@ -58,18 +60,23 @@ export async function awaitExistingAsyncRun(asyncDir: string, runId: string, sig
 	if (runnerExited) return { status: "unavailable", reason: `Async runner for run '${runId}' exited without publishing a result.` };
 	// Only a parsed result file carries importedPublication; status-derived fallbacks do not.
 	if (!completed.importedPublication) return { status: "unavailable", reason: `Async run '${runId}' ended without a result file at ${resultPath}.` };
-	return { status: "settled", result: completed };
+	return { status: "settled", result: { ...completed, importedPublication: completed.importedPublication } };
 }
 
 /**
- * Renames the published result to a file owned by `claimant`. Only one of several
- * concurrent importers can win the rename; the others get undefined and launch fresh.
+ * Renames the published result to a file owned by `claimant`, if it is still the payload the
+ * claimant read. Only one of several concurrent importers can win the rename; the others, and a
+ * claimant whose payload a newer one replaced, get undefined and launch fresh.
  */
-export function claimWorkflowAwaitedResult(asyncDir: string, claimant: string): string | undefined {
-	const claimedPath = `${workflowAwaitedAsyncResultPath(asyncDir)}.${claimant}.claimed`;
+export function claimWorkflowAwaitedResult(asyncDir: string, claimant: string, read: ResultSnapshot): string | undefined {
+	const resultPath = workflowAwaitedAsyncResultPath(asyncDir);
+	const claimedPath = `${resultPath}.${claimant}.claimed`;
 	try {
-		fs.renameSync(workflowAwaitedAsyncResultPath(asyncDir), claimedPath);
-		return claimedPath;
+		return withResultRunLease(asyncDir, read.runId, () => {
+			if (resultSnapshotReplaced(resultPath, read)) return undefined;
+			fs.renameSync(resultPath, claimedPath);
+			return claimedPath;
+		});
 	} catch {
 		return undefined;
 	}

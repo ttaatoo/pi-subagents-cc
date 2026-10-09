@@ -10,8 +10,24 @@ Independent fork (omp-style: **not** created via GitHub's fork button, no upstre
 ## Base commit
 
 - `nicobailon/pi-subagents@a859d1de` — `fix(runner): strip inherited Git routing environment (#2440)`, 2026-09-23. Package version at fork time: `0.70.1`.
-- Upstream sync point: `964481f4` (`fix(workflows): show a revived workflow child as its key's latest run (#2585)`), selective. Applied: MCP hash align, compaction-abort recovery, retention reclaim, inheritSkills skills drop, reload-stopped reuse, undici 8.10.2, agent fixture root, watchdog/retention/supervisor perf, Herdr coordinator count, sibling-stopped states, project-trust inheritance, user-stop descendants, schema anchor, revived-child latest run. Intentionally skipped: scoped-model token, disable-features config, deslop refactor, built-in MCP support, codemode registration, MCP-adapter priority (needs the skipped MCP feat), and the two progressive-widget TUI fixes (lanes/agent-count conflict with this fork's inspector-owned Fleet simplification). The `sync/upstream-*` branches replay the cc layer below on top of upstream; full upstream history lives upstream.
-- Full upstream history lives upstream; this repo starts fresh with the tree at that commit plus the fork branding below.
+- First sync point: `964481f4` (`fix(workflows): show a revived workflow child as its key's latest run (#2585)`), selective. Applied: MCP hash align, compaction-abort recovery, retention reclaim, inheritSkills skills drop, reload-stopped reuse, undici 8.10.2, agent fixture root, watchdog/retention/supervisor perf, Herdr coordinator count, sibling-stopped states, project-trust inheritance, user-stop descendants, schema anchor, revived-child latest run.
+- Current sync point: `ad11b7ab` (`fix: keep a run's final result when a consumer of its paused result cleans up (#2757)`, v0.76.1, 2026-10-08), full-tree. The branch `sync/upstream-ad11b7ab` was cut from the upstream commit and the cc layer replayed on top (`git apply --3way` of `git diff 964481f4 main`), then resolved per the verdicts below. Package version at this sync: fork `0.74.0`.
+
+### Verdicts at the `ad11b7ab` sync
+
+| Upstream change | Verdict | Notes |
+|---|---|---|
+| `#2588` workflow contract (`workflow: true` / path / named resource; `workflowScript`+`workflowScriptPath` removed from the public schema) | **ADOPT (breaking, no shims)** | Owner decision per `VISION.md` hard-cutover policy. The internal `workflowScript` field remains an executor-internal carrier, as upstream designed it. |
+| `#2596` script-free `tasks`/`chain` | **ADOPT, unconditional** | The fork has no `disabledFeatures` surface, so `tasks`/`chain` are always available alongside `workflow` (schema, executor `structuredWorkflows: true`, docs). |
+| `disabledFeatures` config `#2542` | **SKIP (stay removed)** | One delegation surface; a per-feature kill switch contradicts fork scope discipline. `disabled-features.ts` and its tests stay deleted; `chain`/`tasks` rehomed as above. |
+| Built-in MCP direct tools `#2555` + adapter priority `#2575` + `mcp-direct-tool-allowlist` evolution | **ADOPT** | Restores the shared safety file to upstream shape; later upstream fixes assume this foundation. |
+| scoped-model `scoped` token `#2538` (+ `model-scope`/`model-resolution`/`async-execution` threading) | **ADOPT** | Reverted the fork's earlier removal; the feature is upstream-owned and the fork layer does not depend on its absence. |
+| codemode registration `#2574` | **SKIP** | No codemode integration in this fork; a registration hook without an integration is dead surface. Omitted during `extension/index.ts` resolution. |
+| deslop refactor (pre-`#2585`, previously skipped) | **ADOPT** | Comments-only; arrived with the full-tree base. The original skip reason (textual conflict inflation) inverted once the base became upstream itself. |
+| Message blocks `#2753`, provider/model display `#2734`, tmux inspector `#2719`, OSC 7501 `#2725`, runnerLaunchers `#2577/#2720`, zoned daily/weekly schedules `#2656`, worktree-cleanup apply `#2655`, child command supervision `#2598`, `requireForAllRunners` `#2643`, `toolActivation` `#2589/#2595`, async widget collapse `#2621` | **ADOPT** | Arrive with the base; `extension/index.ts` and `tui/render.ts` keep their upstream wiring. |
+| Progressive-widget growth/shrink (`#2651`-family) and lanes-in-compact-card (`#2578`-family) | **SKIP for now** | The fork keeps its simplified progressive widget (`tui/render.ts` resolved to the fork side); the line-budget concept returns with the planned TUI rebuild (`agent-widget.ts`). `asyncWidgetCollapsed` (`#2621`) is adopted; the `rows` layout (`#2738`) arrives via config but the fork-simplified widget ignores advanced layout tiers. |
+
+## What this fork changes (vs upstream)
 
 ## What this fork changes (vs upstream)
 

@@ -13,6 +13,7 @@ import {
 	type AsyncJobState,
 	type AsyncJobStep,
 	type AsyncParallelGroupStatus,
+	type AsyncWidgetLayout,
 	type Details,
 	type HostStepState,
 	type HostStepVerdict,
@@ -2497,6 +2498,7 @@ interface WidgetLayoutSession {
 	columns: number;
 	tier: WidgetRenderTier;
 	lockedRows?: number;
+	rootJobCount?: number;
 	visibleJobKeys: string[];
 }
 
@@ -2710,7 +2712,7 @@ function fitWidgetLineBudget(lines: string[], theme: Theme, width: number, expan
 	return [...lines.slice(0, visibleLines), truncLine(theme.fg("dim", hint), width)];
 }
 
-function fitAdaptiveWidgetLines(jobs: AsyncJobState[], buildLines: () => string[], theme: Theme, width: number, expanded: boolean, frame?: number, projectionFor?: WorkflowWidgetProjectionLookup): string[] {
+function fitAdaptiveWidgetLines(jobs: AsyncJobState[], buildLines: () => string[], theme: Theme, width: number, expanded: boolean, frame?: number, projectionFor?: WorkflowWidgetProjectionLookup, layout: AsyncWidgetLayout = "adaptive"): string[] {
 	if (expanded) {
 		resetWidgetLayoutSession();
 		return fitWidgetLineBudget(buildLines(), theme, width, true);
@@ -2728,17 +2730,20 @@ function fitAdaptiveWidgetLines(jobs: AsyncJobState[], buildLines: () => string[
 	if (hasMatchingSession && widgetLayoutSession?.tier === "progressive" && widgetLayoutSession.lockedRows !== undefined) {
 		const rendered = buildProgressiveWidgetLines(jobs, theme, width, widgetLayoutSession.lockedRows, widgetLayoutSession.visibleJobKeys, frame, projectionFor);
 		widgetLayoutSession.visibleJobKeys = rendered.visibleJobKeys;
-		return rendered.lines;
+		// The "rows" layout is one line per run at content height; the adaptive layout keeps the fork's locked height.
+		return layout === "rows" ? trimTrailingBlankLines(rendered.lines) : rendered.lines;
 	}
 
-	const lines = buildLines();
-	if (lines.length <= availableRows) {
-		widgetLayoutSession = { expanded, rows, columns, tier: "full", visibleJobKeys: [] };
-		return fitWidgetLineBudget(lines, theme, width, false);
-	}
-	if (availableRows > 2 && jobs.length === 1 && projectionFor?.(jobs[0]!).stageProgress) {
-		widgetLayoutSession = { expanded, rows, columns, tier: "full", visibleJobKeys: [] };
-		return fitWidgetLineBudget(lines, theme, width, false);
+	if (layout === "adaptive") {
+		const lines = buildLines();
+		if (lines.length <= availableRows) {
+			widgetLayoutSession = { expanded, rows, columns, tier: "full", visibleJobKeys: [] };
+			return fitWidgetLineBudget(lines, theme, width, false);
+		}
+		if (availableRows > 2 && jobs.length === 1 && projectionFor?.(jobs[0]!).stageProgress) {
+			widgetLayoutSession = { expanded, rows, columns, tier: "full", visibleJobKeys: [] };
+			return fitWidgetLineBudget(lines, theme, width, false);
+		}
 	}
 
 	if (availableRows <= 2) {
@@ -2749,7 +2754,14 @@ function fitAdaptiveWidgetLines(jobs: AsyncJobState[], buildLines: () => string[
 	const lockedRows = Math.min(availableRows, collapsedWidgetLineBudget(rows));
 	const rendered = buildProgressiveWidgetLines(jobs, theme, width, lockedRows, [], frame, projectionFor);
 	widgetLayoutSession = { expanded, rows, columns, tier: "progressive", lockedRows, visibleJobKeys: rendered.visibleJobKeys };
-	return rendered.lines;
+	return layout === "rows" ? trimTrailingBlankLines(rendered.lines) : rendered.lines;
+}
+
+/** Content height for the "rows" layout: drop padded blank rows, always keep the header. */
+function trimTrailingBlankLines(lines: string[]): string[] {
+	let end = lines.length;
+	while (end > 1 && lines[end - 1]!.trim() === "") end--;
+	return lines.slice(0, end);
 }
 
 const asyncWidgetUpdates = new WeakMap<ExtensionContext["ui"], (jobs: AsyncJobState[]) => void>();
@@ -2796,14 +2808,14 @@ function materializedWidgetChildLines(job: AsyncJobState, theme: Theme, width: n
 	return lines;
 }
 
-function buildWidgetComponent(jobs: AsyncJobState[], ui: ExtensionContext["ui"]): (tui: { requestRender(): void }, theme: Theme) => Component {
+function buildWidgetComponent(jobs: AsyncJobState[], ui: ExtensionContext["ui"], initiallyCollapsed = false, layout: AsyncWidgetLayout = "adaptive"): (tui: { requestRender(): void }, theme: Theme) => Component {
 	return (tui, theme) => {
 		const container = new Container();
 		let cachedRenderWidth: number | undefined;
 		let cachedFrame: number | undefined;
 		let cachedExpanded: boolean | undefined;
 		let cachedLines: string[] | undefined;
-		let collapsed = false;
+		let collapsed = initiallyCollapsed;
 		const invalidate = (): void => {
 			cachedLines = undefined;
 			resetWidgetLayoutSession();
@@ -2845,7 +2857,7 @@ function buildWidgetComponent(jobs: AsyncJobState[], ui: ExtensionContext["ui"])
 			cachedExpanded = expanded;
 			cachedLines = (collapsed
 				? buildSingleLineWidgetLines(jobs, theme, width, frame)
-				: fitAdaptiveWidgetLines(roots, buildLines, theme, width, expanded, frame, projectionFor)
+				: fitAdaptiveWidgetLines(roots, buildLines, theme, width, expanded, frame, projectionFor, layout)
 			).map((line) => paddedWidgetLine(line, renderWidth));
 			return cachedLines;
 		};
@@ -2946,7 +2958,7 @@ export function buildWidgetLines(jobs: AsyncJobState[], theme: Theme, width = ge
 /**
  * Render the async jobs widget
  */
-export function renderWidget(ctx: ExtensionContext, jobs: AsyncJobState[]): void {
+export function renderWidget(ctx: ExtensionContext, jobs: AsyncJobState[], initiallyCollapsed = false, layout: AsyncWidgetLayout = "adaptive"): void {
 	if (jobs.length === 0) {
 		resetWidgetLayoutSession();
 		asyncWidgetUpdates.delete(ctx.ui);
@@ -2962,7 +2974,7 @@ export function renderWidget(ctx: ExtensionContext, jobs: AsyncJobState[]): void
 	// component instead so progress cannot move it past other extensions' widgets.
 	const update = asyncWidgetUpdates.get(ctx.ui);
 	if (update) update(jobs);
-	else ctx.ui.setWidget(WIDGET_KEY, buildWidgetComponent(jobs, ctx.ui));
+	else ctx.ui.setWidget(WIDGET_KEY, buildWidgetComponent(jobs, ctx.ui, initiallyCollapsed, layout));
 }
 
 function renderSingleCompact(
@@ -2985,7 +2997,7 @@ function renderSingleCompact(
 	const width = getTermWidth() - 4;
 	const detailIndent = mainWindowIndent(layout, 1);
 	const continuationIndent = mainWindowIndent(layout, 2) + (layout.horizontalSpacing > 0 ? " " : "");
-	const modelDisplay = modelThinkingBadge(theme, r.model ?? r.progress?.model, r.thinking ?? r.progress?.thinking);
+	const modelDisplay = modelThinkingBadge(theme, r.progress?.model ?? r.model, r.thinking ?? r.progress?.thinking);
 	c.addChild(new Text(truncLine(`${resultGlyph(r, output, theme, isRunning, undefined, frame)} ${theme.fg("toolTitle", theme.bold(foregroundSingleDisplayName(r)))}${modelDisplay}${contextBadge}${stats ? ` ${theme.fg("dim", "·")} ${stats}` : ""}`, width), 0, 0));
 
 	if (isRunning && r.progress) {
@@ -3241,7 +3253,7 @@ function renderMultiCompact(d: Details, theme: Theme, layout: MainWindowRenderLa
 		const pendingLabel = rPending ? ` ${theme.fg("dim", "· pending")}` : "";
 		const stepLabel = entry.rowLabel;
 		const rowProgressModel = rProg && "status" in rProg ? rProg : undefined;
-		const rowModelDisplay = modelThinkingBadge(theme, r.model ?? rowProgressModel?.model, r.thinking ?? rowProgressModel?.thinking);
+		const rowModelDisplay = modelThinkingBadge(theme, rowProgressModel?.model ?? r.model, r.thinking ?? rowProgressModel?.thinking);
 		const labelPrefix = stepLabel ? `${stepLabel}: ` : "";
 		const line = `${glyph} ${labelPrefix}${themeBold(theme, agentName)}${contextModeBadge(theme, r.context)}${rowModelDisplay}${stepStats ? ` ${theme.fg("dim", "·")} ${stepStats}` : ""}${pendingLabel}`;
 		c.addChild(new Text(truncLine(`${rowIndent}${line}`, width), 0, 0));
@@ -3442,7 +3454,7 @@ export function renderSubagentResult(
 		if (r.skillsWarning) {
 			c.addChild(new Text(fit(theme.fg("warning", `Warning: ${r.skillsWarning}`)), 0, 0));
 		}
-		c.addChild(new Text(fit(theme.fg("dim", formatUsage(r.usage, r.model))), 0, 0));
+		c.addChild(new Text(fit(theme.fg("dim", formatUsage(r.usage, r.progress?.model ?? r.model))), 0, 0));
 		if (r.sessionFile) {
 			c.addChild(new Text(fit(theme.fg("dim", `Session: ${shortenPath(r.sessionFile)}`)), 0, 0));
 		}
@@ -3588,7 +3600,7 @@ export function renderSubagentResult(
 		const resultOutput = getSingleResultOutput(r);
 		const rowPresentation = styledResultPresentation(resultPresentation(r, resultOutput, rRunning, progressRunningSeed(rProg), frame), theme);
 		const stats = rProg ? ` | ${rProg.toolCount} tools, ${formatDuration(rProg.durationMs)}` : "";
-		const modelDisplay = modelThinkingBadge(theme, r.model ?? rProg?.model, r.thinking ?? rProg?.thinking);
+		const modelDisplay = modelThinkingBadge(theme, rProg?.model ?? r.model, r.thinking ?? rProg?.thinking);
 		const stepLabel = entry.rowLabel;
 		const contextBadge = contextModeBadge(theme, r.context);
 		const labelPrefix = stepLabel ? `${stepLabel}: ` : "";
